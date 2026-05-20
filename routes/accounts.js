@@ -1,8 +1,12 @@
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const { authenticateToken } = require('../middleware/auth');
 const { PrismaClient } = require('@prisma/client');
+const { parseAccountTracker } = require('../services/accountTrackerImporter');
 const prisma = new PrismaClient();
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 router.use(authenticateToken);
 
@@ -10,6 +14,9 @@ const ALLOWED = new Set([
   'name', 'domain', 'website', 'industry', 'subIndustry', 'revenue', 'employees',
   'country', 'region', 'city', 'description', 'notes', 'status', 'tier',
   'techStack', 'tags', 'linkedInUrl', 'twitterUrl', 'foundedYear',
+  'priorityTier', 'dealMotion', 'targetCloseDate', 'closeQuarter', 'useCases',
+  'primaryStakeholder', 'backupStakeholders', 'warmIntroPaths', 'weeklyFocus',
+  'outreachStatus', 'lastContactedAt', 'myNotes', 'rep',
 ]);
 
 const accountIncludes = {
@@ -37,6 +44,46 @@ router.get('/', async (req, res) => {
       orderBy: { name: 'asc' },
     });
     res.json(accounts);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /accounts/import-xlsx — upload Excel account tracker, upsert by company name
+router.post('/import-xlsx', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ message: 'No file uploaded (field name: file)' });
+  try {
+    const { accounts, warnings, sheetName } = parseAccountTracker(req.file.buffer);
+    if (!accounts.length) {
+      return res.status(400).json({ message: 'No account rows found', warnings, sheetName });
+    }
+
+    let created = 0;
+    let updated = 0;
+    const failures = [];
+
+    for (const acct of accounts) {
+      try {
+        const existing = await prisma.account.findFirst({
+          where: { name: { equals: acct.name } },
+          select: { id: true },
+        });
+        const data = Object.fromEntries(
+          Object.entries(acct).filter(([k]) => ALLOWED.has(k))
+        );
+        if (existing) {
+          await prisma.account.update({ where: { id: existing.id }, data });
+          updated++;
+        } else {
+          await prisma.account.create({ data });
+          created++;
+        }
+      } catch (err) {
+        failures.push({ name: acct.name, error: err.message });
+      }
+    }
+
+    res.json({ ok: true, sheetName, created, updated, total: accounts.length, failures, warnings });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

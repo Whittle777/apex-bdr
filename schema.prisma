@@ -19,34 +19,50 @@ model User {
   sequences              Sequence[]
   integrationCredentials IntegrationCredential[]
   ownedProspects         Prospect[]              @relation("OwnedBy")
+  ownedAccounts          Account[]
   prospectOwnerships     ProspectOwner[]
   enrolledEnrollments    SequenceEnrollment[]    @relation("EnrolledBy")
 }
 
 model Account {
-  id            Int        @id @default(autoincrement())
-  name          String
-  domain        String?
-  website       String?
-  industry      String?
-  subIndustry   String?
-  revenue       String?    // e.g. "$10M–$50M"
-  employees     String?    // e.g. "100–500"
-  country       String?
-  region        String?
-  city          String?
-  description   String?
-  notes         String?
-  status        String     @default("prospect") // prospect | customer | churned | partner
-  tier          String?    // enterprise | mid-market | smb
-  techStack     String?
-  tags          String?    // JSON array
-  linkedInUrl   String?
-  twitterUrl    String?
-  foundedYear   Int?
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
-  prospects     Prospect[]
+  id                  Int        @id @default(autoincrement())
+  name                String
+  domain              String?
+  website             String?
+  industry            String?
+  subIndustry         String?
+  revenue             String?    // e.g. "$10M–$50M"
+  employees           String?    // e.g. "100–500"
+  country             String?
+  region              String?
+  city                String?
+  description         String?
+  notes               String?
+  status              String     @default("prospect") // prospect | customer | churned | partner
+  tier                String?    // enterprise | mid-market | smb
+  techStack           String?
+  tags                String?    // JSON array
+  linkedInUrl         String?
+  twitterUrl          String?
+  foundedYear         Int?
+  // FY27 account-tracker fields (from BDR Excel import)
+  priorityTier        String?    // A-Existing | A-Priority | B-Pursue | B-Watch
+  dealMotion          String?
+  targetCloseDate     DateTime?
+  closeQuarter        String?
+  useCases            String?    // free text — top use cases for personalization
+  primaryStakeholder  String?
+  backupStakeholders  String?
+  warmIntroPaths      String?
+  weeklyFocus         String?
+  outreachStatus      String?    // Not Started | Research Phase | Outreach Sent | In Conv...
+  lastContactedAt     DateTime?
+  myNotes             String?
+  rep                 String?    // denormalized rep name from Excel
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+  prospects           Prospect[]
+  owners              User[]
 }
 
 model Prospect {
@@ -109,6 +125,11 @@ model SequenceStep {
   delayDays       Int
   subject         String          @default("")
   body            String          @default("")
+  // AI personalization (Track B)
+  aiPersonalize   Boolean         @default(false)
+  aiPurpose       String?         // one-line intent — e.g. "Cold open, hook with priority use case"
+  aiInstructions  String?         // multi-line voice/style/constraint guide
+  aiModel         String?         // override provider model — e.g. "gemini-2.5-pro"
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
   schemaTag       String          @default("default")
@@ -150,13 +171,19 @@ model EmailActivity {
   prospectId     Int
   sequenceStepId Int
   enrollmentId   Int
-  status         String    @default("sent")  // sent | opened | failed | cancelled
+  status         String    @default("sent")  // sent | opened | failed | cancelled | draft_pending | rejected
   subject        String    @default("")
   scheduledFor   DateTime?
   sentAt         DateTime?
   openedAt       DateTime?
   failureReason     String?
   externalMessageId String?   // Nodemailer Message-ID for In-Reply-To matching
+  // AI personalization draft fields (Track B)
+  draftBody         String?   // AI-generated body awaiting HITL approval
+  draftPrompt       String?   // full prompt sent to the model (for HITL display + regenerate)
+  draftReasoning    String?   // model's reasoning chain (if returned)
+  draftModel        String?   // e.g. "gemini-2.5-pro"
+  draftProvider     String?   // "gemini" | "claude"
   createdAt         DateTime  @default(now())
 
   prospect     Prospect           @relation(fields: [prospectId], references: [id], onDelete: Cascade)

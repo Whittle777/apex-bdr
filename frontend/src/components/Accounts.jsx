@@ -97,6 +97,24 @@ const EMPTY_FORM = {
   revenue: '', employees: '', country: '', region: '', city: '',
   description: '', notes: '', status: 'prospect', tier: '',
   techStack: '', tags: '[]', linkedInUrl: '', twitterUrl: '', foundedYear: '',
+  // FY27 account-tracker fields
+  priorityTier: '', dealMotion: '', targetCloseDate: '', closeQuarter: '',
+  useCases: '', primaryStakeholder: '', backupStakeholders: '', warmIntroPaths: '',
+  weeklyFocus: '', outreachStatus: '', lastContactedAt: '', myNotes: '', rep: '',
+};
+
+const PRIORITY_TIER_STYLES = {
+  'A-Existing': { bg: 'rgba(34,197,94,0.12)', color: '#22c55e', border: 'rgba(34,197,94,0.25)' },
+  'A-Priority': { bg: 'rgba(59,130,246,0.18)', color: '#3b82f6', border: 'rgba(59,130,246,0.3)' },
+  'B-Pursue':   { bg: 'rgba(234,179,8,0.15)',  color: '#eab308', border: 'rgba(234,179,8,0.3)' },
+  'B-Watch':    { bg: 'rgba(239,68,68,0.12)',  color: '#ef4444', border: 'rgba(239,68,68,0.25)' },
+};
+
+const formatDateInput = (iso) => {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
 };
 
 const AccountDetail = ({ account, onSaved, onDeleted, allProspects }) => {
@@ -111,7 +129,14 @@ const AccountDetail = ({ account, onSaved, onDeleted, allProspects }) => {
 
   useEffect(() => {
     if (account) {
-      setForm({ ...EMPTY_FORM, ...account, foundedYear: account.foundedYear ?? '', tags: account.tags || '[]' });
+      setForm({
+        ...EMPTY_FORM,
+        ...account,
+        foundedYear: account.foundedYear ?? '',
+        tags: account.tags || '[]',
+        targetCloseDate: formatDateInput(account.targetCloseDate),
+        lastContactedAt: formatDateInput(account.lastContactedAt),
+      });
       setActiveTab('details');
       setConfirmDel(false);
     }
@@ -136,6 +161,8 @@ const AccountDetail = ({ account, onSaved, onDeleted, allProspects }) => {
       const res = await api.put(`/accounts/${account.id}`, {
         ...form,
         foundedYear: form.foundedYear ? parseInt(form.foundedYear) : null,
+        targetCloseDate: form.targetCloseDate ? new Date(form.targetCloseDate).toISOString() : null,
+        lastContactedAt: form.lastContactedAt ? new Date(form.lastContactedAt).toISOString() : null,
       });
       onSaved(res.data);
       toast(`"${form.name}" saved`, 'success', 2000);
@@ -246,6 +273,70 @@ const AccountDetail = ({ account, onSaved, onDeleted, allProspects }) => {
       <div style={{ flex: 1, overflowY: 'auto', padding: '20px 24px' }}>
         {activeTab === 'details' && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
+
+            <Section title="FY27 Account Research">
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Grid2>
+                  <Field label="Priority Tier">{input('priorityTier', { placeholder: 'A-Existing · A-Priority · B-Pursue · B-Watch' })}</Field>
+                  <Field label="Rep">{input('rep', { placeholder: 'Owning rep' })}</Field>
+                </Grid2>
+                <Grid2>
+                  <Field label="Deal Motion">{input('dealMotion', { placeholder: 'e.g. Net-New Pursuit' })}</Field>
+                  <Field label="Outreach Status">{input('outreachStatus', { placeholder: 'Not Started · Research Phase · …' })}</Field>
+                </Grid2>
+                <Grid2>
+                  <Field label="Target Close Date"><input type="date" value={form.targetCloseDate || ''} onChange={e => setForm(f => ({ ...f, targetCloseDate: e.target.value }))} /></Field>
+                  <Field label="Close Quarter">{input('closeQuarter', { placeholder: 'e.g. Q2 (Aug–Oct 2026)' })}</Field>
+                </Grid2>
+                <Field label="Top Use Cases (drives personalization)">
+                  <textarea
+                    value={form.useCases || ''}
+                    onChange={e => setForm(f => ({ ...f, useCases: e.target.value }))}
+                    placeholder="Top use cases relevant to this account — used as research context for AI personalization"
+                    rows={3}
+                    style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
+                  />
+                </Field>
+                <Field label="Primary Stakeholder">{input('primaryStakeholder', { placeholder: 'Name + title' })}</Field>
+                <Field label="Backup Stakeholders">
+                  <textarea
+                    value={form.backupStakeholders || ''}
+                    onChange={e => setForm(f => ({ ...f, backupStakeholders: e.target.value }))}
+                    rows={2}
+                    style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
+                  />
+                </Field>
+                <Field label="Warm Intro Paths">
+                  <textarea
+                    value={form.warmIntroPaths || ''}
+                    onChange={e => setForm(f => ({ ...f, warmIntroPaths: e.target.value }))}
+                    rows={2}
+                    style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
+                  />
+                </Field>
+                <Field label="Q1 Weekly Focus / Key Gates">
+                  <textarea
+                    value={form.weeklyFocus || ''}
+                    onChange={e => setForm(f => ({ ...f, weeklyFocus: e.target.value }))}
+                    rows={2}
+                    style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
+                  />
+                </Field>
+                <Grid2>
+                  <Field label="Last Contact Date"><input type="date" value={form.lastContactedAt || ''} onChange={e => setForm(f => ({ ...f, lastContactedAt: e.target.value }))} /></Field>
+                  <div />
+                </Grid2>
+                <Field label="My Notes">
+                  <textarea
+                    value={form.myNotes || ''}
+                    onChange={e => setForm(f => ({ ...f, myNotes: e.target.value }))}
+                    placeholder="Personal notes from outreach"
+                    rows={3}
+                    style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
+                  />
+                </Field>
+              </div>
+            </Section>
 
             <Section title="Classification">
               <Grid2>
@@ -440,6 +531,8 @@ const Accounts = () => {
   const [creating, setCreating]         = useState(false);
   const [newName, setNewName]           = useState('');
   const [autoLinking, setAutoLinking]   = useState(false);
+  const [importing, setImporting]       = useState(false);
+  const fileInputRef = useRef(null);
   const toast = useToast();
 
   const fetchAccounts = async () => {
@@ -474,6 +567,30 @@ const Accounts = () => {
       toast(err.response?.data?.message || 'Failed to create', 'error');
     } finally {
       setCreating(false);
+    }
+  };
+
+  const handleImport = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ''; // allow re-selecting the same file
+    if (!file) return;
+    setImporting(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await api.post('/accounts/import-xlsx', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const d = res.data;
+      toast(`Imported ${d.total} accounts (${d.created} new, ${d.updated} updated) from "${d.sheetName}"`, 'success', 4000);
+      if (d.failures?.length) {
+        toast(`${d.failures.length} row(s) failed — check console`, 'error', 5000);
+        console.error('Import failures:', d.failures);
+      }
+      fetchAccounts();
+    } catch (err) {
+      toast(err.response?.data?.message || 'Import failed', 'error', 4000);
+      console.error(err);
+    } finally {
+      setImporting(false);
     }
   };
 
@@ -555,11 +672,32 @@ const Accounts = () => {
           </div>
         </div>
 
-        {/* Create form */}
-        <form onSubmit={handleCreate} style={{ display: 'flex', gap: 6, padding: '8px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
-          <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New account name…" style={{ flex: 1, fontSize: '0.8rem' }} />
-          <button type="submit" disabled={creating || !newName.trim()} style={{ padding: '6px 10px', fontSize: '0.78rem' }}>+</button>
-        </form>
+        {/* Create form + Excel import */}
+        <div style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+          <form onSubmit={handleCreate} style={{ display: 'flex', gap: 6, padding: '8px 10px 6px' }}>
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New account name…" style={{ flex: 1, fontSize: '0.8rem' }} />
+            <button type="submit" disabled={creating || !newName.trim()} style={{ padding: '6px 10px', fontSize: '0.78rem' }}>+</button>
+          </form>
+          <div style={{ padding: '0 10px 8px' }}>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+              onChange={handleImport}
+              style={{ display: 'none' }}
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              className="ghost"
+              style={{ width: '100%', fontSize: '0.74rem', padding: '6px 0', textAlign: 'center', color: 'var(--text-muted)' }}
+              title="Upload the FY27 Account Tracker .xlsx — upserts by company name"
+            >
+              {importing ? 'Importing…' : '📥 Import Account Tracker (.xlsx)'}
+            </button>
+          </div>
+        </div>
 
         {/* List */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '6px 6px' }}>
@@ -591,9 +729,14 @@ const Accounts = () => {
                     </div>
                   </div>
                 </div>
-                <div style={{ display: 'flex', gap: 4, marginTop: 5, flexWrap: 'wrap' }}>
+                <div style={{ display: 'flex', gap: 4, marginTop: 5, flexWrap: 'wrap', alignItems: 'center' }}>
                   <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '1px 6px', borderRadius: 9999, border: `1px solid ${st.border}`, background: st.bg, color: st.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{acc.status}</span>
                   {ti && <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '1px 6px', borderRadius: 9999, border: `1px solid ${ti.border}`, background: ti.bg, color: ti.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{acc.tier}</span>}
+                  {acc.priorityTier && (() => {
+                    const ps = PRIORITY_TIER_STYLES[acc.priorityTier] || { bg: 'var(--bg-tertiary)', color: 'var(--text-muted)', border: 'var(--border-subtle)' };
+                    return <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '1px 6px', borderRadius: 9999, border: `1px solid ${ps.border}`, background: ps.bg, color: ps.color, textTransform: 'uppercase', letterSpacing: '0.04em' }}>{acc.priorityTier}</span>;
+                  })()}
+                  {acc.rep && <span style={{ fontSize: '0.6rem', color: 'var(--text-muted)', marginLeft: 2 }}>· {acc.rep}</span>}
                 </div>
               </div>
             );

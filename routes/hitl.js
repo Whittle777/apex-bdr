@@ -33,6 +33,28 @@ let reviewQueue = [
 
 let nextId = 4;
 
+/**
+ * Push an item to the in-memory HITL queue from other modules (e.g. sequenceMailer).
+ * Pairs with EmailActivity rows that are the durable source of truth — this is for
+ * UI awareness only.
+ */
+function pushItem(item) {
+  const queueItem = {
+    id: nextId++,
+    type: item.type || 'Email Draft',
+    confidenceScore: item.confidenceScore ?? 75,
+    urgency: item.urgency || 'Medium',
+    status: 'pending',
+    prospectId: item.prospectId || null,
+    emailActivityId: item.emailActivityId || null,
+    draftContent: item.draftContent || '',
+    aiSummary: item.aiSummary || '',
+    createdAt: new Date().toISOString(),
+  };
+  reviewQueue.push(queueItem);
+  return queueItem;
+}
+
 // GET /hitl/queue — return all pending review items
 router.get('/queue', (req, res) => {
   const pending = reviewQueue.filter(item => item.status === 'pending');
@@ -172,3 +194,4 @@ router.get('/stats', (req, res) => {
 });
 
 module.exports = router;
+module.exports.pushItem = pushItem;

@@ -21,6 +21,8 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const crypto = require('crypto');
 const { getDueEnrollments, recordStepSent } = require('./enrollmentService');
+const { personalize } = require('./emailPersonalizer');
+const hitlRouter = require('../routes/hitl');
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
@@ -127,12 +129,94 @@ function interpolate(template, prospect) {
 }
 
 /**
+ * If the step has aiPersonalize=true, generate a draft and queue it for HITL review
+ * instead of sending. Returns the draft EmailActivity row.
+ *
+ * Side effects:
+ *   - Creates an EmailActivity with status='draft_pending'
+ *   - Pauses the enrollment (pausedReason='awaiting_review') so cron doesn't loop
+ *   - Pushes a reference to the in-memory HITL queue for UI awareness
+ *
+ * Idempotent: if a draft_pending already exists for this enrollment+step, returns it.
+ */
+async function createPersonalizedDraft(enrollment, step) {
+  const existing = await prisma.emailActivity.findFirst({
+    where: { enrollmentId: enrollment.id, sequenceStepId: step.id, status: 'draft_pending' },
+  });
+  if (existing) return existing;
+
+  const prospect = await prisma.prospect.findUnique({
+    where: { id: enrollment.prospectId },
+    include: { account: true },
+  });
+
+  let draft;
+  try {
+    draft = await personalize({ step, prospect, account: prospect.account });
+  } catch (err) {
+    await prisma.emailActivity.create({
+      data: {
+        prospectId: enrollment.prospectId,
+        sequenceStepId: step.id,
+        enrollmentId: enrollment.id,
+        status: 'failed',
+        subject: interpolate(step.subject || '', prospect),
+        failureReason: `Personalization failed: ${err.message}`,
+      },
+    });
+    throw err;
+  }
+
+  const draftRow = await prisma.emailActivity.create({
+    data: {
+      prospectId: enrollment.prospectId,
+      sequenceStepId: step.id,
+      enrollmentId: enrollment.id,
+      status: 'draft_pending',
+      subject: draft.subject,
+      scheduledFor: new Date(),
+      draftBody: draft.body,
+      draftPrompt: draft.prompt,
+      draftReasoning: draft.reasoning,
+      draftModel: draft.model,
+      draftProvider: draft.provider,
+    },
+  });
+
+  await prisma.sequenceEnrollment.update({
+    where: { id: enrollment.id },
+    data: { status: 'paused', pausedAt: new Date(), pausedReason: 'awaiting_review', nextStepDue: null },
+  });
+
+  if (typeof hitlRouter.pushItem === 'function') {
+    try {
+      hitlRouter.pushItem({
+        type: 'Email Draft',
+        confidenceScore: 75,
+        urgency: 'Medium',
+        prospectId: enrollment.prospectId,
+        emailActivityId: draftRow.id,
+        draftContent: `Subject: ${draft.subject}\n\n${draft.body}`,
+        aiSummary: draft.reasoning || `Personalized via ${draft.provider} ${draft.model}.`,
+      });
+    } catch { /* non-critical */ }
+  }
+
+  return draftRow;
+}
+
+/**
  * Send one sequence step email to one prospect.
  * Uses the sequence owner's Microsoft credential via Graph API,
  * falling back to Google SMTP if no Microsoft credential exists.
  * Returns the EmailActivity record created.
+ *
+ * If step.aiPersonalize is true, instead of sending, generates a draft for HITL review.
  */
 async function sendStepEmail(enrollment, step) {
+  if (step.aiPersonalize) {
+    return await createPersonalizedDraft(enrollment, step);
+  }
   const { prospect } = enrollment;
   const ownerId = enrollment.sequence?.userId;
   const subject = interpolate(step.subject, prospect);
@@ -293,4 +377,4 @@ async function runDueSequenceEmails() {
   return results;
 }
 
-module.exports = { sendStepEmail, runDueSequenceEmails, interpolate };
+module.exports = { sendStepEmail, runDueSequenceEmails, interpolate, createPersonalizedDraft };

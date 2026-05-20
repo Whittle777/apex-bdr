@@ -4,7 +4,7 @@
   "description": "Apex BDR backend server",
   "main": "index.js",
   "scripts": {
-    "start": "npx prisma db push && node index.js",
+    "start": "node scripts/dbPushWithRetry.js && node index.js",
     "dev": "nodemon index.js",
     "build": "cd frontend && npm install && npm run build",
     "railway:deploy": "npm run build && npx prisma migrate deploy",
@@ -49,7 +49,8 @@
     "redis": "^5.11.0",
     "sequelize": "^6.37.8",
     "winston": "^3.19.0",
-    "ws": "^8.20.0"
+    "ws": "^8.20.0",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "dotenv-cli": "^11.0.0",

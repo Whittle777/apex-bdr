@@ -289,7 +289,11 @@ const SequenceManager = () => {
           stepType: stepForm.stepType,
           delayDays: stepForm.delayDays,
           subject: stepForm.subject,
-          body: stepForm.body
+          body: stepForm.body,
+          aiPersonalize: !!stepForm.aiPersonalize,
+          aiPurpose: stepForm.aiPurpose || null,
+          aiInstructions: stepForm.aiInstructions || null,
+          aiModel: stepForm.aiModel || null,
         });
       } else {
         const sequenceSteps = allSteps.filter(s => s.sequenceId === activeSequenceId);
@@ -302,10 +306,14 @@ const SequenceManager = () => {
           delayDays: stepForm.delayDays,
           subject: stepForm.subject,
           body: stepForm.body,
+          aiPersonalize: !!stepForm.aiPersonalize,
+          aiPurpose: stepForm.aiPurpose || null,
+          aiInstructions: stepForm.aiInstructions || null,
+          aiModel: stepForm.aiModel || null,
         });
       }
       setIsAddingStep(false);
-      setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '' });
+      setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '', aiPersonalize: false, aiPurpose: '', aiInstructions: '', aiModel: '' });
       fetchSequences();
       toast(stepForm.id ? 'Step updated' : 'Step added', 'success', 2000);
     } catch (err) {
@@ -336,6 +344,10 @@ const SequenceManager = () => {
         delayDays: step.delayDays,
         subject: step.subject,
         body: step.body,
+        aiPersonalize: !!step.aiPersonalize,
+        aiPurpose: step.aiPurpose || '',
+        aiInstructions: step.aiInstructions || '',
+        aiModel: step.aiModel || '',
       });
       fetchSequences();
       toast('Step duplicated', 'success', 2000);
@@ -871,7 +883,7 @@ const SequenceManager = () => {
                                 type="button"
                                 className="ghost"
                                 style={{ fontSize: '0.72rem', color: 'var(--text-muted)', padding: '2px 6px' }}
-                                onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '' }); }}
+                                onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '', aiPersonalize: false, aiPurpose: '', aiInstructions: '', aiModel: '' }); }}
                               >
                                 ✕ Cancel
                               </button>
@@ -935,6 +947,52 @@ const SequenceManager = () => {
                                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Body Template</label>
                                     <textarea value={stepForm.body} onChange={e => setStepForm({...stepForm, body: e.target.value})} placeholder={"Hi {{firstName}},\n\n"} style={{ width: '100%', marginTop: 4, minHeight: 120, resize: 'vertical' }} />
                                   </div>
+
+                                  {/* AI personalization toggle + fields */}
+                                  <div style={{ marginTop: 4, padding: '10px 12px', background: 'var(--bg-glass)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={!!stepForm.aiPersonalize}
+                                        onChange={e => setStepForm({ ...stepForm, aiPersonalize: e.target.checked })}
+                                      />
+                                      ✨ AI-personalize each email at send time (routes to HITL review)
+                                    </label>
+                                    {stepForm.aiPersonalize && (
+                                      <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                        <div>
+                                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Intent (one line)</label>
+                                          <input
+                                            value={stepForm.aiPurpose}
+                                            onChange={e => setStepForm({ ...stepForm, aiPurpose: e.target.value })}
+                                            placeholder="e.g. Cold open. Hook with top use case. Ask for 20-min discovery."
+                                            style={{ width: '100%', marginTop: 4 }}
+                                          />
+                                        </div>
+                                        <div>
+                                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Voice / Style / Constraints</label>
+                                          <textarea
+                                            value={stepForm.aiInstructions}
+                                            onChange={e => setStepForm({ ...stepForm, aiInstructions: e.target.value })}
+                                            placeholder="e.g. Direct, peer-to-peer tone. Reference Tom Siebel ↔ stakeholder relationships when available. Max 100 words."
+                                            style={{ width: '100%', marginTop: 4, minHeight: 80, resize: 'vertical' }}
+                                          />
+                                        </div>
+                                        <div>
+                                          <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Model override (optional)</label>
+                                          <input
+                                            value={stepForm.aiModel}
+                                            onChange={e => setStepForm({ ...stepForm, aiModel: e.target.value })}
+                                            placeholder="default: gemini-2.5-pro · alternatives: gemini-2.5-flash · claude-opus-4-7 · claude-sonnet-4-6"
+                                            style={{ width: '100%', marginTop: 4, fontFamily: 'monospace', fontSize: '0.78rem' }}
+                                          />
+                                        </div>
+                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                                          When enabled, the cron mailer creates a draft instead of sending. Drafts appear in the HITL review queue and at <code>/email-activities/drafts</code> with the prompt visible — you can edit & regenerate before approving.
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
                                 </>
                               ) : (
                                 <>
@@ -950,7 +1008,7 @@ const SequenceManager = () => {
                               )}
                               <div style={{ display: 'flex', gap: 8 }}>
                                 <button type="submit" style={{ flex: 1 }}>Save Step</button>
-                                <button type="button" className="secondary" onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '' }); }}>Cancel</button>
+                                <button type="button" className="secondary" onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '', aiPersonalize: false, aiPurpose: '', aiInstructions: '', aiModel: '' }); }}>Cancel</button>
                               </div>
                             </form>
                           </>
@@ -969,7 +1027,7 @@ const SequenceManager = () => {
                                 <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
                                   {cumulativeDay === 0 ? 'Immediate' : `Day ${cumulativeDay}`}
                                 </span>
-                                <button className="ghost" style={{ fontSize: '0.72rem', padding: '2px 7px' }} onClick={() => { setStepForm(step); setIsAddingStep(true); }}>Edit</button>
+                                <button className="ghost" style={{ fontSize: '0.72rem', padding: '2px 7px' }} onClick={() => { setStepForm({ ...step, aiPersonalize: !!step.aiPersonalize, aiPurpose: step.aiPurpose || '', aiInstructions: step.aiInstructions || '', aiModel: step.aiModel || '' }); setIsAddingStep(true); }}>Edit</button>
                                 <button className="ghost" style={{ fontSize: '0.72rem', padding: '2px 7px' }} onClick={() => duplicateStep(step)}>Dupe</button>
                                 <button className="ghost" style={{ fontSize: '0.72rem', padding: '2px 7px', color: 'var(--status-danger)' }} onClick={() => deleteStep(step.id)}>Delete</button>
                               </div>
@@ -1024,7 +1082,7 @@ const SequenceManager = () => {
                   {(!isAddingStep || stepForm.id !== null) ? (
                     <button
                       className="secondary"
-                      onClick={() => { setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '' }); setIsAddingStep(true); }}
+                      onClick={() => { setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '', aiPersonalize: false, aiPurpose: '', aiInstructions: '', aiModel: '' }); setIsAddingStep(true); }}
                       style={{ borderStyle: 'dashed', width: '100%', justifyContent: 'center', backgroundColor: 'transparent' }}
                     >
                       + Add New Step
@@ -1034,7 +1092,7 @@ const SequenceManager = () => {
                     <div style={{ backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--accent-primary)', padding: 16, borderRadius: 'var(--radius-md)' }}>
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
                         <h4 style={{ margin: 0, fontSize: '0.9rem' }}>New Step</h4>
-                        <button type="button" className="ghost" style={{ fontSize: '0.72rem', color: 'var(--text-muted)', padding: '2px 6px' }} onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '' }); }}>✕ Cancel</button>
+                        <button type="button" className="ghost" style={{ fontSize: '0.72rem', color: 'var(--text-muted)', padding: '2px 6px' }} onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '', aiPersonalize: false, aiPurpose: '', aiInstructions: '', aiModel: '' }); }}>✕ Cancel</button>
                       </div>
                       {['AUTO_EMAIL','MANUAL_EMAIL'].includes(stepForm.stepType) && (
                         <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 10px', background: 'var(--accent-dim)', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-accent)', marginBottom: 12 }}>
@@ -1110,7 +1168,7 @@ const SequenceManager = () => {
                         )}
                         <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
                           <button type="submit" style={{ flex: 1 }}>Save Step</button>
-                          <button type="button" className="secondary" onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '' }); }}>Cancel</button>
+                          <button type="button" className="secondary" onClick={() => { setIsAddingStep(false); setStepForm({ id: null, order: null, stepType: 'AUTO_EMAIL', delayDays: 1, subject: '', body: '', aiPersonalize: false, aiPurpose: '', aiInstructions: '', aiModel: '' }); }}>Cancel</button>
                         </div>
                       </form>
                     </div>
