@@ -1,127 +1,184 @@
 # Apex BDR — Microsoft Integration Approval Request
 
-**Prepared by:** Henry Whittle (henry.whittle@c3.ai)  
-**App name in Azure:** apex-bdr  
-**Deployment URL:** https://apex-bdr-production.up.railway.app  
-**Date:** May 2026
+**Submitted by:** Henry Whittle (henry.whittle@c3.ai)
+**App:** Apex BDR (internal SDR/BDR tool)
+**Azure App Registration:** `apex-bdr` · App ID `4a2c47db-d36e-4a99-8102-a617a3d9ffe0`
+**Sign-in audience:** AzureADMyOrg (single-tenant — C3.ai only, enforced at the Azure AD level)
+**Deployment:** https://apex-bdr-production.up.railway.app
+**Audience:** ~5–10 C3.ai BDR reps. Not customer-facing. Not public.
 
 ---
 
-## What We Need From You (30 seconds)
+## TL;DR — What I'm asking for
 
-A Global Administrator visits the URL below while signed into the C3.ai Azure tenant and clicks **Accept**:
+A Global Admin grants admin-consent for the app's permissions, one time. After that, BDR reps sign in with their C3.ai Microsoft accounts and the app sends sequence emails from each rep's own Outlook mailbox and places calls from each rep's own Teams Phone number.
 
+**One-click admin-consent URL** (replace `{TENANT_ID}` with C3.ai's Entra tenant GUID):
 ```
-https://login.microsoftonline.com/[C3AI_TENANT_ID]/adminconsent
-  ?client_id=[APEX_CLIENT_ID]
+https://login.microsoftonline.com/{TENANT_ID}/adminconsent
+  ?client_id=4a2c47db-d36e-4a99-8102-a617a3d9ffe0
   &redirect_uri=https://apex-bdr-production.up.railway.app/auth/microsoft/callback
 ```
 
-*(Henry: replace `[C3AI_TENANT_ID]` with your tenant ID and `[APEX_CLIENT_ID]` with your Azure app Client ID before sending)*
+**Or via portal:** Entra ID → Enterprise Applications → search `apex-bdr` → Permissions → **Grant admin consent for C3.ai**.
 
-That's it. All C3.ai BDR reps can then sign in and use the app without any further prompts.
-
-**Alternatively via portal:**  
-Azure Portal → Azure Active Directory → Enterprise Applications → search "apex-bdr" → Permissions → **Grant admin consent for C3.ai**
+That's it.
 
 ---
 
-## What Is Apex BDR?
+## What Apex BDR does (in one paragraph)
 
-An internal sales engagement tool used exclusively by the C3.ai BDR team (~5–10 people). It does three things:
-
-1. **Reps sign in with their C3.ai Microsoft account** — no separate username/password
-2. **Outbound sequence emails send from each rep's own Outlook address** — not a shared inbox
-3. **Outbound calls place through each rep's existing Teams Phone number** — rep clicks Dial, their headset rings
-
-Nothing is exposed to customers or the public. Only C3.ai employees with a company email address can sign in.
+A BDR-only outreach tool. Reps sign in with their C3.ai Microsoft accounts. The app organizes their target accounts, drafts personalized emails using an AI model, **routes every AI-generated draft to a human review queue before sending**, then sends the approved email from the rep's own Outlook mailbox. Calls fire through each rep's own Teams Phone number when the rep clicks "Dial." Nothing is exposed to customers, prospects, or the public.
 
 ---
 
-## Permissions Requested
+## Email reputation & deliverability protections (the part most relevant to IT)
 
-### Delegated — act on behalf of the signed-in rep only
+C3.ai's `@c3.ai` sender reputation is protected by multiple layers:
 
-| Permission | Plain English | Why |
+| Protection | How it works |
+|---|---|
+| **No bulk blasts.** Every email is one-to-one, sent from the rep's individual Outlook mailbox via Graph `Mail.Send`. | No shared sender. No third-party SMTP relay. No bypass of normal C3.ai outbound mail filters. |
+| **Human-in-the-loop on every AI draft.** | When a rep enables AI personalization on a step, the AI generates a draft but **does not send it**. The draft lands in a review queue. The rep reads, edits, and approves before the email actually goes out. **No "AI slop" can leave the tenant unreviewed.** Code: `routes/emailActivities.js` (POST `/:id/approve`). |
+| **Hard daily cap per deployment** (`MAX_EMAILS_PER_DAY=200`, configurable). | Once today's count is reached, the mailer stops. No way to override. |
+| **Per-send throttle** (`EMAIL_SEND_DELAY_MS=2000`, configurable). | Two-second gap between sends — well under Microsoft's per-mailbox sending throttle. |
+| **Hard-bounce auto-pause.** | SMTP 550–554 / "user not found" / "mailbox unavailable" → enrollment paused immediately, prospect flagged as `Bounced`. Code: `services/sequenceMailer.js → isHardBounce()`. |
+| **Repeat-failure auto-pause.** | 3 failed sends to the same enrollment in 7 days → paused. |
+| **RFC 8058 one-click unsubscribe headers** on every send. | `List-Unsubscribe` + `List-Unsubscribe-Post: List-Unsubscribe=One-Click` — required by Gmail/Yahoo bulk-sender rules. Implemented in both Graph and SMTP send paths. |
+| **Reply detection auto-pauses sequences.** | Every 10 min the app polls each rep's Inbox (via `Mail.Read`) for replies to its own sent emails (matched by `In-Reply-To` Message-ID). On reply, the enrollment stops. Out-of-office replies pause-and-resume; genuine replies stop the sequence. |
+| **Tracking pixel — first-party only.** | Open-tracking pixel served from `apex-bdr-production.up.railway.app`, not a third-party tracker. No pixel data shared externally. |
+| **Tenant-restricted at the Entra level.** | App registration `signInAudience = AzureADMyOrg`. Tokens cannot be issued to identities outside C3.ai. |
+
+---
+
+## Permissions requested
+
+### Delegated — act as the signed-in rep only
+
+| Permission | What it does | Why it's needed |
 |---|---|---|
-| `openid` | Confirm the user's identity at sign-in | Required for SSO |
-| `offline_access` | Keep the session alive without re-prompting every hour | Usability |
-| `User.Read` | Read the rep's name and email address | Create their account in the app on first login |
-| `Mail.Send` | Send email from the rep's Outlook account | Sequence emails go from henry.whittle@c3.ai, not a shared address |
-| `Mail.Read` | Scan the rep's inbox for replies | Auto-pause sequences when a prospect replies or is out of office |
+| `openid` | Identify the user at sign-in | Required for SSO |
+| `offline_access` | Refresh the rep's access token over time | Lets sequences keep running without re-prompting the rep every hour |
+| `User.Read` | Read the rep's name, email, and AAD object ID | Provisions the rep's local account on first login; the object ID is required for the Calls API |
+| `Mail.Send` | Send email from the rep's mailbox | Sequence emails go from the rep's own address (e.g. `henry.whittle@c3.ai`), not a shared inbox |
+| `Mail.Read` | Read the rep's mailbox | Detect replies to sequence emails so we can auto-pause sequences when prospects respond |
 
-**Key point on delegated permissions:** These only activate when the rep is actively signed in. The app cannot access a rep's email while they're logged out. Each permission is scoped to that individual rep's data only — not the broader tenant.
+**Honest note on `Mail.Read`:** the reply-detection cron runs every 10 minutes and uses the rep's stored refresh token to fetch new access tokens — meaning it will read the rep's inbox whether the rep is actively in a browser session or not. This is intentional (sequences need to pause on prospect replies even when reps are away), but you should know about it. The rep can disconnect at any time (see "How to revoke" below), which deletes the refresh token and stops all background access immediately.
 
 ### Application — run server-side for outbound calling
 
-| Permission | Plain English | Why |
+| Permission | What it does | Why it's needed |
 |---|---|---|
-| `Calls.Initiate.All` | Place an outbound call from a rep's Teams Phone number | Rep clicks Dial in the app → their headset rings → prospect is called |
-| `Calls.AccessMedia.All` | Connect the audio channel for the call | Required by Microsoft alongside Calls.Initiate.All for any PSTN call |
+| `Calls.Initiate.All` | Place an outbound PSTN call from a Teams Phone number | Rep clicks "Dial" in the app → their Teams client rings → they pick up → the prospect is called |
+| `Calls.AccessMedia.All` | Connect the audio channel for the call | Microsoft requires this alongside `Calls.Initiate.All` for any PSTN call |
 
-**Key point on calling permissions:** These fire only when a rep manually clicks Dial on a specific prospect record. There is no automated dialing, no scheduled calling, and no bulk operations. Each call is a deliberate one-click action by a signed-in rep.
+**Honest note on application permissions:** these are **tenant-wide application permissions**, not delegated. Technically the app's service principal could initiate a call from *any* Teams-licensed user in the tenant. In practice the app only initiates a call when a signed-in rep clicks Dial on a specific prospect — but the permission grant itself is broader than the usage. Mitigations:
+- Restrict the app via **Assignment required = Yes** (see below) so only the BDR group can sign in.
+- All call placements are logged in our `CallActivity` table with the initiating user ID and prospect ID.
+- No bulk dialing. No cron-triggered calls. No queue-based calling. Each call is one rep + one click.
 
 ---
 
-## What Data Is Accessed and Stored
+## What data is accessed and what is stored
 
-| Data | Accessed | Stored by Apex | Retention |
+| Data | Accessed? | Stored by Apex? | Retention |
 |---|---|---|---|
-| Rep's name and work email | Yes — at login | Yes | Until rep account is deleted |
-| Rep's Microsoft Object ID | Yes — at login | Yes — required to place calls via the API | Until rep account is deleted |
-| OAuth refresh token | Yes — at login | Yes — stored in the app database to maintain the session | Until rep disconnects their account |
-| Outbound emails content | Yes — to send them | No — only subject line and sent timestamp | N/A |
-| Rep's inbox | Yes — scanned for replies from prospects | Only subject and sender of matched replies | 90 days |
-| Call audio | No | No — Microsoft routes audio between the rep's headset and the prospect; Apex never receives it | N/A |
-| Call metadata (duration, outcome) | Yes — from Microsoft webhook | Yes | Until rep account is deleted |
-| Calendar, contacts, files, Teams chat | No | No | Not requested |
+| Rep's name, work email, AAD object ID | Yes — at login | Yes | Until rep account is deleted |
+| OAuth refresh token (per rep) | Yes — at login | Yes — in a private PostgreSQL database on Railway | Until rep disconnects, or admin revokes consent |
+| Outbound email content | Yes — to send via Graph | **No** — only subject line, recipient, sent timestamp, and Message-ID stored | Activity rows kept until account deleted |
+| Rep's inbox | Yes — scanned for replies to sequence emails (matched by Message-ID) | Only subject + first ~500 chars of matched replies + classification (`ooo` / `genuine_reply` / `bounce` / `unsubscribe`) | 90 days |
+| Call audio | **No** — Microsoft routes audio directly between rep and prospect; Apex never sees it | No | N/A |
+| Call metadata (duration, outcome, disposition) | Yes — via Microsoft webhook + rep-logged data | Yes | Until rep account is deleted |
+| Calendar, contacts, files, Teams chat, OneDrive, SharePoint | **No** | **No** | Not requested |
+
+**Where it's stored:**
+- Database: managed PostgreSQL on Railway (US region, private network, encrypted at rest at the volume level).
+- App credentials (`MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `JWT_SECRET`) live as Railway environment variables — never in source code or the repository.
+- No data leaves Apex for any external service except Microsoft Graph (to send/read mail and place calls) and the AI provider (Google Gemini or Anthropic Claude) for personalization drafting.
+
+**What the AI provider sees:** when an AI-personalized draft is requested, the prompt sent to Gemini/Claude contains the prospect's name + title + company + the account research the rep entered in Apex (use cases, stakeholders, etc.). The provider does not see any inbox content, calendar, files, or other Microsoft Graph data.
 
 ---
 
-## Security
+## Security controls
 
-- **No passwords stored.** All authentication is via Microsoft SSO. Apex stores only the OAuth refresh token issued by Microsoft.
-- **Tokens are stored in a private PostgreSQL database** on Railway (US-based, not publicly accessible). Connection requires credentials not exposed in source code.
-- **App credentials** (Client ID and Client Secret) are environment variables on Railway, not in the source code or repository.
-- **Tenant isolation.** The app is configured with C3.ai's tenant ID. It cannot acquire tokens for users outside the C3.ai directory.
-- **No third-party data sharing.** Prospect and rep data does not leave the app or get shared with any external service.
-- **Source code is available for review** — see files listed at the bottom of this document.
-
----
-
-## How to Restrict Access (Recommended)
-
-You can limit sign-in to the BDR team only, so the app is not available to all C3.ai employees:
-
-1. Azure Portal → Enterprise Applications → apex-bdr
-2. Under **Properties**, set **Assignment required** to **Yes**
-3. Under **Users and groups**, add only the BDR team members or an existing security group
-
-This means only assigned users can sign in, even after admin consent is granted.
+- **Tenant-restricted at Entra.** The app registration uses `signInAudience = AzureADMyOrg`. Azure AD will reject any sign-in from outside the C3.ai tenant before a token is even issued. *(Note: the app's OAuth client uses Microsoft's `/common/` endpoint and relies on Entra to enforce the tenant restriction. We can switch to `/{tenant_id}/` and add a code-side `tid` claim check on request — see "Open follow-ups for IT" below.)*
+- **No passwords stored.** All authentication is Microsoft SSO. Apex stores only the OAuth refresh token issued by Microsoft, never a password.
+- **OAuth state parameter** with 10-minute TTL prevents CSRF on the redirect.
+- **Session JWTs** signed with a secret held only in Railway env vars; 30-day expiry; not refreshable (rep must re-sign with Microsoft when expired).
+- **Tracking pixel, unsubscribe handler, and all webhook endpoints are public-by-design** but signed/validated; no privileged operations exposed publicly.
+- **Source code available for review.** Henry can grant read access to the private GitHub repo (`Whittle777/apex-bdr`) on request.
 
 ---
 
-## How to Revoke Access Instantly
+## How to restrict access (strongly recommended)
 
-- **Revoke all access:** Azure Portal → Enterprise Applications → apex-bdr → Delete. All rep sessions and tokens are immediately invalidated.
-- **Revoke one rep:** Azure Portal → Users → [rep name] → Apps and permissions → Remove apex-bdr.
+After granting admin consent, restrict sign-in to the BDR group only:
+
+1. Entra ID → Enterprise Applications → apex-bdr → **Properties**
+2. Set **Assignment required** = **Yes**
+3. **Users and groups** → add the BDR team (individual users or a security group like `bdr-team@c3.ai`)
+
+With this on, even though admin consent is granted tenant-wide, only assigned users can sign in.
 
 ---
 
-## Source Code Available for Review
+## How to revoke instantly
 
-henry.whittle@c3.ai can provide read access to the private repository on request. Key files:
+| To do this | Where |
+|---|---|
+| Kill the entire app, all rep sessions, all refresh tokens | Entra → Enterprise Applications → apex-bdr → **Delete** |
+| Remove one rep's access | Entra → Users → [rep] → **Apps and permissions** → Remove apex-bdr |
+| Pause without deleting | Entra → Enterprise Applications → apex-bdr → **Properties** → set **Enabled for users to sign in?** to **No** |
+| Revoke a single refresh token | Entra → Users → [rep] → **Authentication methods** → revoke sessions |
+
+All of the above take effect within minutes. Subsequent Graph API calls with the revoked token return 401 and the app surfaces the error in its UI.
+
+---
+
+## Audit & monitoring (what IT can inspect)
+
+Inside Apex:
+- `EmailActivity` table — every email send/fail/open/reply with timestamps and `sentBy` rep
+- `CallActivity` table — every call placed, including duration and outcome
+- `IntegrationCredential` table — who has connected which provider, when
+
+Inside Microsoft (no Apex involvement):
+- Entra ID Sign-in logs — who signed in to apex-bdr, when, from where
+- Microsoft Graph audit logs — every Graph API call apex-bdr's service principal makes
+- Teams Admin Center — call detail records
+
+Apex never modifies or hides any of these — IT retains full visibility through standard Microsoft tooling.
+
+---
+
+## Open follow-ups (planned hardening, before scaling beyond pilot)
+
+These are not blockers for pilot approval but I'd like to land them before we expand the user count:
+
+1. **Code-side tenant-ID claim check.** Add `if (payload.tid !== C3_TENANT_ID) reject` in the OAuth callback as a belt-and-suspenders defense on top of the Entra-side restriction.
+2. **Column-level encryption of refresh tokens at rest.** Railway already provides volume encryption; column-level adds defense-in-depth.
+3. **Granular audit log** for every Graph API call (rep, action, target, timestamp) — would feed into a security report I can hand to IT on demand.
+
+Happy to prioritize any of these if IT considers them blocking.
+
+---
+
+## Source code pointers
 
 | File | What it does |
 |---|---|
-| `routes/microsoftOAuth.js` | Handles sign-in, token exchange, stores refresh token |
-| `services/sequenceMailer.js` | Sends outbound emails via Graph API (Mail.Send) |
-| `services/replyDetector.js` | Reads inbox to detect prospect replies (Mail.Read) |
-| `services/teamsCallService.js` | Places outbound calls via Graph Calls API |
-| `routes/calls.js` | Receives call state webhooks from Microsoft |
+| `routes/microsoftOAuth.js` | Sign-in flow + token storage |
+| `services/sequenceMailer.js` | Email send (Graph + SMTP fallback) + send-safety guardrails |
+| `services/replyDetector.js` | Reply polling, classification, auto-pause |
+| `services/teamsCallService.js` | Calls API — place call, handle media |
+| `routes/calls.js` | Call state webhooks from Microsoft |
+| `routes/hitl.js` / `routes/emailActivities.js` | Human-in-the-loop review of AI-personalized drafts |
+| `prisma/schema.prisma` | Full data model — every field stored is listed here |
 
 ---
 
-## Questions
+## Contact
 
-Contact henry.whittle@c3.ai or schedule a call for a live walkthrough of the app.
+**Henry Whittle** — henry.whittle@c3.ai
+Happy to schedule a 15-minute walkthrough or screen share to demonstrate any of the above. I can also run any specific test scenario IT wants to see (e.g., revocation propagation time, bounce handling, HITL review of a sample AI draft).
