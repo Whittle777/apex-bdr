@@ -11,24 +11,33 @@
 
 ## TL;DR — What I'm asking for
 
-A Global Admin grants admin-consent for the app's permissions, one time. After that, BDR reps sign in with their C3.ai Microsoft accounts and the app sends sequence emails from each rep's own Outlook mailbox and places calls from each rep's own Teams Phone number.
+**One click from a Global Admin.** Grant admin consent for the app's permissions in Entra. After that, BDR reps sign in with their C3.ai Microsoft accounts and the app sends sequence emails from each rep's own Outlook mailbox.
 
-**One-click admin-consent URL** (replace `{TENANT_ID}` with C3.ai's Entra tenant GUID):
+**One-click admin-consent URL:**
 ```
-https://login.microsoftonline.com/{TENANT_ID}/adminconsent
+https://login.microsoftonline.com/53ad779a-93e7-485c-ba20-ac8290d7252b/adminconsent
   ?client_id=4a2c47db-d36e-4a99-8102-a617a3d9ffe0
   &redirect_uri=https://apex-bdr-production.up.railway.app/auth/microsoft/callback
 ```
 
 **Or via portal:** Entra ID → Enterprise Applications → search `apex-bdr` → Permissions → **Grant admin consent for C3.ai**.
 
-That's it.
+That's it for the pilot. No PowerShell, no Teams admin changes required at this stage.
+
+### Two-phase rollout (so this ask stays small)
+
+| Phase | What it enables | What IT does |
+|---|---|---|
+| **Phase 1 — now (this ask)** | Email sending + reply detection from each rep's Outlook mailbox. | One-click admin consent above. |
+| **Phase 2 — later, separate ask** | Outbound calling from each rep's Teams Phone number. | A short Teams PowerShell setup (Application Access Policy) — only when we're ready to enable calling. |
+
+The calling permissions (`Calls.Initiate.All`, `Calls.AccessMedia.All`) are included in the consent screen now so IT isn't asked to redo this flow later — but they remain **inert until Phase 2's Teams setup is performed**. With no Application Access Policy in place, any call attempt is rejected by Teams itself with *"application not authorized to access this resource."* They're listed but cannot be exercised.
 
 ---
 
 ## What Apex BDR does (in one paragraph)
 
-A BDR-only outreach tool. Reps sign in with their C3.ai Microsoft accounts. The app organizes their target accounts, drafts personalized emails using an AI model, **routes every AI-generated draft to a human review queue before sending**, then sends the approved email from the rep's own Outlook mailbox. Calls fire through each rep's own Teams Phone number when the rep clicks "Dial." Nothing is exposed to customers, prospects, or the public.
+A BDR-only outreach tool. Reps sign in with their C3.ai Microsoft accounts. The app organizes their target accounts, drafts personalized emails using an AI model, **routes every AI-generated draft to a human review queue before sending**, then sends the approved email from the rep's own Outlook mailbox. *(A future phase will add outbound calling through each rep's own Teams Phone number — that's a separate, smaller ask in Phase 2 and is not exercised in this pilot.)* Nothing is exposed to customers, prospects, or the public.
 
 ---
 
