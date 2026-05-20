@@ -1,12 +1,25 @@
 const express = require('express');
 const router = express.Router();
 const multer = require('multer');
+const crypto = require('crypto');
 const { authenticateToken } = require('../middleware/auth');
 const { PrismaClient } = require('@prisma/client');
-const { parseAccountTracker } = require('../services/accountTrackerImporter');
+const { parseAccountTracker, parseRaw, applyMapping } = require('../services/accountTrackerImporter');
+const { proposeMapping, ACCOUNT_FIELDS, FIELD_DESCRIPTIONS } = require('../services/headerMapper');
 const prisma = new PrismaClient();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+// In-memory cache of parsed uploads pending mapping confirmation.
+// TTL: 10 minutes. Keyed by uploadId (UUID).
+const pendingUploads = new Map();
+const UPLOAD_TTL_MS = 10 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of pendingUploads.entries()) {
+    if (now - v.createdAt > UPLOAD_TTL_MS) pendingUploads.delete(k);
+  }
+}, 60_000).unref();
 
 router.use(authenticateToken);
 
@@ -49,7 +62,91 @@ router.get('/', async (req, res) => {
   }
 });
 
-// POST /accounts/import-xlsx — upload Excel account tracker, upsert by company name
+// POST /accounts/import-xlsx/preview — parse the file, get an AI-proposed mapping
+// for the user to confirm/edit. Returns { uploadId, headers, sampleRows, proposedMapping, ... }
+router.post('/import-xlsx/preview', upload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ message: 'No file uploaded (field name: file)' });
+  try {
+    const { headers, rows, sampleRows, sheetName, warnings } = parseRaw(req.file.buffer);
+    if (!headers.length || !rows.length) {
+      return res.status(400).json({ message: 'Could not find headers + data rows', warnings, sheetName });
+    }
+
+    const proposal = await proposeMapping(headers, sampleRows);
+
+    const uploadId = crypto.randomUUID();
+    pendingUploads.set(uploadId, { headers, rows, sheetName, createdAt: Date.now() });
+
+    res.json({
+      uploadId,
+      sheetName,
+      headers,
+      sampleRows,                     // 2-D array, first 3 data rows
+      proposedMapping: proposal.mapping,
+      mappingSource: proposal.source, // 'ai' | 'fallback'
+      mappingReasoning: proposal.reasoning,
+      mappingModel: proposal.model,
+      accountFields: ACCOUNT_FIELDS,
+      fieldDescriptions: FIELD_DESCRIPTIONS,
+      rowCount: rows.length,
+      warnings,
+      expiresInMs: UPLOAD_TTL_MS,
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /accounts/import-xlsx/commit — apply the (possibly user-edited) mapping and upsert
+router.post('/import-xlsx/commit', async (req, res) => {
+  const { uploadId, mapping } = req.body || {};
+  if (!uploadId || !mapping || typeof mapping !== 'object') {
+    return res.status(400).json({ message: 'uploadId and mapping are required' });
+  }
+  const cached = pendingUploads.get(uploadId);
+  if (!cached) {
+    return res.status(410).json({ message: 'Upload expired or not found — please re-upload the file' });
+  }
+
+  try {
+    const { accounts, warnings } = applyMapping(cached.headers, cached.rows, mapping);
+    if (warnings.length && !accounts.length) {
+      return res.status(400).json({ message: warnings[0], warnings });
+    }
+
+    let created = 0;
+    let updated = 0;
+    const failures = [];
+
+    for (const acct of accounts) {
+      try {
+        const existing = await prisma.account.findFirst({
+          where: { name: { equals: acct.name } },
+          select: { id: true },
+        });
+        const data = Object.fromEntries(
+          Object.entries(acct).filter(([k]) => ACCOUNT_FIELDS.includes(k))
+        );
+        if (existing) {
+          await prisma.account.update({ where: { id: existing.id }, data });
+          updated++;
+        } else {
+          await prisma.account.create({ data });
+          created++;
+        }
+      } catch (err) {
+        failures.push({ name: acct.name, error: err.message });
+      }
+    }
+
+    pendingUploads.delete(uploadId);
+    res.json({ ok: true, sheetName: cached.sheetName, created, updated, total: accounts.length, failures, warnings });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /accounts/import-xlsx — legacy direct upload (uses hardcoded HEADER_MAP). Kept for compatibility.
 router.post('/import-xlsx', upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ message: 'No file uploaded (field name: file)' });
   try {

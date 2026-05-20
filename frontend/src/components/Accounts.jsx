@@ -532,6 +532,9 @@ const Accounts = () => {
   const [newName, setNewName]           = useState('');
   const [autoLinking, setAutoLinking]   = useState(false);
   const [importing, setImporting]       = useState(false);
+  const [importPreview, setImportPreview] = useState(null);
+  const [editedMapping, setEditedMapping] = useState({});
+  const [committing, setCommitting]     = useState(false);
   const fileInputRef = useRef(null);
   const toast = useToast();
 
@@ -578,20 +581,44 @@ const Accounts = () => {
     try {
       const fd = new FormData();
       fd.append('file', file);
-      const res = await api.post('/accounts/import-xlsx', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      const res = await api.post('/accounts/import-xlsx/preview', fd, { headers: { 'Content-Type': 'multipart/form-data' } });
+      setImportPreview(res.data);
+      setEditedMapping({ ...(res.data.proposedMapping || {}) });
+    } catch (err) {
+      toast(err.response?.data?.message || 'Preview failed', 'error', 4000);
+      console.error(err);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const handleCommitImport = async () => {
+    if (!importPreview?.uploadId) return;
+    setCommitting(true);
+    try {
+      const res = await api.post('/accounts/import-xlsx/commit', {
+        uploadId: importPreview.uploadId,
+        mapping: editedMapping,
+      });
       const d = res.data;
       toast(`Imported ${d.total} accounts (${d.created} new, ${d.updated} updated) from "${d.sheetName}"`, 'success', 4000);
       if (d.failures?.length) {
         toast(`${d.failures.length} row(s) failed — check console`, 'error', 5000);
         console.error('Import failures:', d.failures);
       }
+      setImportPreview(null);
+      setEditedMapping({});
       fetchAccounts();
     } catch (err) {
       toast(err.response?.data?.message || 'Import failed', 'error', 4000);
-      console.error(err);
     } finally {
-      setImporting(false);
+      setCommitting(false);
     }
+  };
+
+  const handleCancelImport = () => {
+    setImportPreview(null);
+    setEditedMapping({});
   };
 
   const handleAutoLink = async () => {
@@ -759,6 +786,124 @@ const Accounts = () => {
           onDeleted={handleDeleted}
           allProspects={allProspects}
         />
+      </div>
+
+      {/* Import mapping modal */}
+      {importPreview && (
+        <ImportMappingModal
+          preview={importPreview}
+          mapping={editedMapping}
+          onChange={setEditedMapping}
+          onConfirm={handleCommitImport}
+          onCancel={handleCancelImport}
+          committing={committing}
+        />
+      )}
+    </div>
+  );
+};
+
+// ── Import mapping modal ──────────────────────────────────────────────────────
+
+const ImportMappingModal = ({ preview, mapping, onChange, onConfirm, onCancel, committing }) => {
+  const { headers, sampleRows, accountFields, fieldDescriptions, sheetName, rowCount, mappingSource, mappingModel, mappingReasoning } = preview;
+  const updateField = (header, value) => onChange({ ...mapping, [header]: value });
+
+  const sampleForHeader = (h, idx) => {
+    const samples = sampleRows.map(r => r[idx]).filter(v => v != null && v !== '');
+    return samples[0];
+  };
+
+  const nameCount = Object.values(mapping).filter(v => v === 'name').length;
+  const canImport = nameCount === 1 && !committing;
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }} onClick={onCancel}>
+      <div className="glass-card" onClick={e => e.stopPropagation()} style={{ background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-lg)', width: 'min(900px, 92vw)', maxHeight: '88vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        {/* Header */}
+        <div style={{ padding: '16px 22px', borderBottom: '1px solid var(--border-color)' }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 16 }}>
+            <div>
+              <h3 style={{ margin: 0, fontSize: '1.05rem' }}>Confirm column mapping</h3>
+              <div style={{ marginTop: 4, fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+                <strong style={{ color: 'var(--text-secondary)' }}>{sheetName}</strong> · {rowCount} rows · {headers.length} columns
+                <span style={{ marginLeft: 10, padding: '1px 8px', borderRadius: 9999, fontSize: '0.68rem', fontWeight: 700, background: mappingSource === 'ai' ? 'var(--accent-dim)' : 'var(--bg-tertiary)', color: mappingSource === 'ai' ? 'var(--accent-secondary)' : 'var(--text-muted)', border: `1px solid ${mappingSource === 'ai' ? 'var(--border-accent)' : 'var(--border-subtle)'}` }}>
+                  {mappingSource === 'ai' ? `✦ AI mapped (${mappingModel})` : '⚙ Keyword fallback'}
+                </span>
+              </div>
+              {mappingReasoning && (
+                <div style={{ marginTop: 6, fontSize: '0.74rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>{mappingReasoning}</div>
+              )}
+            </div>
+            <button onClick={onCancel} className="ghost" style={{ padding: '4px 10px', fontSize: '0.85rem' }}>✕</button>
+          </div>
+        </div>
+
+        {/* Body — mapping table */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 22px' }}>
+          <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.07em', marginBottom: 10 }}>
+            Map each column to an Account field. Unmapped columns can go to <code>notes</code> (catch-all) or be skipped.
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1.4fr 1.2fr', gap: 0, border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', overflow: 'hidden' }}>
+            {/* Table header */}
+            <div style={{ padding: '8px 12px', background: 'var(--bg-tertiary)', fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-color)' }}>Spreadsheet column</div>
+            <div style={{ padding: '8px 12px', background: 'var(--bg-tertiary)', fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-color)' }}>Sample value</div>
+            <div style={{ padding: '8px 12px', background: 'var(--bg-tertiary)', fontSize: '0.7rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', borderBottom: '1px solid var(--border-color)' }}>Maps to</div>
+
+            {headers.map((h, i) => {
+              const sample = sampleForHeader(h, i);
+              const current = mapping[h] || 'notes';
+              const isName = current === 'name';
+              const isSkipped = current === '_skip';
+              return (
+                <React.Fragment key={i}>
+                  <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: 6, opacity: isSkipped ? 0.5 : 1 }}>
+                    <span style={{ fontWeight: 600, fontSize: '0.84rem' }}>{h || <em style={{ color: 'var(--text-muted)' }}>(empty)</em>}</span>
+                    {isName && <span style={{ fontSize: '0.6rem', fontWeight: 700, padding: '1px 6px', borderRadius: 9999, background: 'var(--accent-dim)', color: 'var(--accent-secondary)', border: '1px solid var(--border-accent)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>Key</span>}
+                  </div>
+                  <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border-subtle)', fontSize: '0.78rem', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', opacity: isSkipped ? 0.5 : 1 }} title={String(sample ?? '')}>
+                    {sample == null || sample === '' ? <em style={{ color: 'var(--text-muted)' }}>—</em> : String(sample).slice(0, 80)}
+                  </div>
+                  <div style={{ padding: '6px 10px', borderBottom: '1px solid var(--border-subtle)' }}>
+                    <select
+                      value={current}
+                      onChange={e => updateField(h, e.target.value)}
+                      style={{ width: '100%', fontSize: '0.8rem', padding: '5px 8px', background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)' }}
+                    >
+                      <option value="_skip">— Skip this column —</option>
+                      <option value="notes">notes (catch-all)</option>
+                      {accountFields.filter(f => f !== 'notes').map(f => (
+                        <option key={f} value={f} title={fieldDescriptions?.[f] || ''}>{f}</option>
+                      ))}
+                    </select>
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+
+          {nameCount === 0 && (
+            <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--status-danger-soft, rgba(239,68,68,0.1))', border: '1px solid var(--status-danger-border, rgba(239,68,68,0.3))', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', color: 'var(--status-danger)' }}>
+              ⚠ Map exactly one column to <code>name</code> — it's the upsert key.
+            </div>
+          )}
+          {nameCount > 1 && (
+            <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--status-warning-soft, rgba(234,179,8,0.1))', border: '1px solid var(--status-warning-border, rgba(234,179,8,0.3))', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', color: 'var(--status-warning, #eab308)' }}>
+              ⚠ Multiple columns mapped to <code>name</code>. Only one can be the key.
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: '12px 22px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 10, justifyContent: 'flex-end', alignItems: 'center' }}>
+          <div style={{ marginRight: 'auto', fontSize: '0.74rem', color: 'var(--text-muted)' }}>
+            {Object.values(mapping).filter(v => v && v !== '_skip').length} of {headers.length} columns will be imported
+          </div>
+          <button onClick={onCancel} className="ghost" style={{ padding: '8px 16px' }}>Cancel</button>
+          <button onClick={onConfirm} disabled={!canImport} style={{ padding: '8px 18px', fontWeight: 600 }}>
+            {committing ? 'Importing…' : `Import ${rowCount} accounts`}
+          </button>
+        </div>
       </div>
     </div>
   );

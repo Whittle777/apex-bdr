@@ -22,6 +22,9 @@ const HEADER_MAP = {
   'rep':                      'rep',
 };
 
+// Fields that need date parsing during apply
+const DATE_FIELDS = new Set(['targetCloseDate', 'lastContactedAt']);
+
 function normalize(s) {
   return (s == null ? '' : String(s)).trim().toLowerCase();
 }
@@ -50,7 +53,11 @@ function parseLocation(loc) {
 function findHeaderRow(rows) {
   for (let i = 0; i < Math.min(rows.length, 10); i++) {
     const row = rows[i];
-    if (row.some(c => normalize(c) === 'company')) return i;
+    if (!Array.isArray(row)) continue;
+    if (row.some(c => {
+      const n = normalize(c);
+      return n === 'company' || n === 'company name' || n === 'account' || n === 'account name';
+    })) return i;
   }
   return -1;
 }
@@ -110,7 +117,9 @@ function parseSheet(ws) {
 }
 
 /**
- * Parse a workbook buffer or path, return account rows ready for upsert.
+ * Parse a workbook buffer or path, return account rows ready for upsert
+ * using the legacy hardcoded HEADER_MAP.
+ *
  * Looks for the first sheet whose name contains "account tracker" (case-insensitive),
  * falls back to the first sheet.
  */
@@ -126,4 +135,95 @@ function parseAccountTracker(input) {
   return { ...result, sheetName };
 }
 
-module.exports = { parseAccountTracker };
+/**
+ * Parse the raw workbook into { headers, rows, sampleRows, sheetName } without
+ * applying any field mapping. Used by the preview endpoint so the AI mapper can
+ * see the headers + sample data, and the user can confirm the mapping.
+ */
+function parseRaw(input) {
+  const wb = Buffer.isBuffer(input)
+    ? XLSX.read(input, { type: 'buffer', cellDates: true })
+    : XLSX.readFile(input, { cellDates: true });
+  const sheetName = wb.SheetNames.find(s => /account tracker/i.test(s)) || wb.SheetNames[0];
+  if (!sheetName) return { headers: [], rows: [], sampleRows: [], sheetName: null, warnings: ['Workbook has no sheets'] };
+
+  const ws = wb.Sheets[sheetName];
+  const allRows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null, raw: true });
+  const headerIdx = findHeaderRow(allRows);
+  if (headerIdx < 0) return { headers: [], rows: [], sampleRows: [], sheetName, warnings: ["Could not find header row containing 'Company' or 'Account Name'"] };
+
+  const headers = (allRows[headerIdx] || []).map(h => (h == null ? '' : String(h).trim()));
+  const dataRows = allRows.slice(headerIdx + 1).filter(r => Array.isArray(r) && r.some(c => c != null && c !== ''));
+  const sampleRows = dataRows.slice(0, 3);
+
+  return { headers, rows: dataRows, sampleRows, sheetName, warnings: [] };
+}
+
+/**
+ * Apply a user-provided mapping to raw rows to produce account objects.
+ *
+ * @param {string[]}   headers   - Column headers in order.
+ * @param {Array[]}    rows      - 2-D array of raw cell values.
+ * @param {Object}     mapping   - { <header>: <field name | "_skip" | "notes"> }
+ *                                 Special values: "_skip" drops the column,
+ *                                 "notes" appends "<header>: <value>" to Account.notes.
+ * @returns {{accounts: Object[], warnings: string[]}}
+ */
+function applyMapping(headers, rows, mapping) {
+  const warnings = [];
+  const accounts = [];
+  const nameCol = headers.findIndex(h => mapping[h] === 'name');
+  if (nameCol < 0) {
+    return { accounts: [], warnings: ['No column was mapped to "name" — at least one column must be the company name.'] };
+  }
+
+  // Resolve special columns by index for speed
+  const locationIdx = headers.findIndex(h => mapping[h] === '__location' || mapping[h] === 'location_split');
+
+  for (const row of rows) {
+    const name = row[nameCol];
+    if (!name || (typeof name === 'string' && !name.trim())) continue;
+    const acct = { name: typeof name === 'string' ? name.trim() : String(name) };
+    const notesParts = [];
+
+    headers.forEach((h, i) => {
+      if (i === nameCol) return;
+      const field = mapping[h];
+      if (!field || field === '_skip') return;
+      const value = row[i];
+      if (value == null || value === '') return;
+
+      if (field === 'notes') {
+        notesParts.push(`${h}: ${typeof value === 'string' ? value.trim() : value}`);
+        return;
+      }
+      if (field === '__location' || field === 'location_split') {
+        const loc = parseLocation(value);
+        if (loc.city)    acct.city = acct.city || loc.city;
+        if (loc.region)  acct.region = acct.region || loc.region;
+        if (loc.country) acct.country = acct.country || loc.country;
+        return;
+      }
+      if (DATE_FIELDS.has(field)) {
+        const d = parseDate(value);
+        if (d) acct[field] = d;
+        return;
+      }
+      if (field === 'foundedYear') {
+        const n = parseInt(value);
+        if (!isNaN(n)) acct.foundedYear = n;
+        return;
+      }
+      acct[field] = typeof value === 'string' ? value.trim() : value;
+    });
+
+    if (notesParts.length) {
+      acct.notes = (acct.notes ? acct.notes + '\n' : '') + notesParts.join('\n');
+    }
+    accounts.push(acct);
+  }
+
+  return { accounts, warnings };
+}
+
+module.exports = { parseAccountTracker, parseRaw, applyMapping };
