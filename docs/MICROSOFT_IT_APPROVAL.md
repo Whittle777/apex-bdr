@@ -39,6 +39,8 @@ The calling permissions (`Calls.Initiate.All`, `Calls.AccessMedia.All`) are incl
 
 A BDR-only outreach tool. Reps sign in with their C3.ai Microsoft accounts. The app organizes their target accounts, drafts personalized emails using an AI model, **routes every AI-generated draft to a human review queue before sending**, then sends the approved email from the rep's own Outlook mailbox. *(A future phase will add outbound calling through each rep's own Teams Phone number — that's a separate, smaller ask in Phase 2 and is not exercised in this pilot.)* Nothing is exposed to customers, prospects, or the public.
 
+**Out of scope for this pilot (no integration requested):** Microsoft Dynamics / Dataverse / any CRM system, SharePoint, OneDrive, Teams chat, calendar, contacts, files. Prospect and account data is entered directly in Apex; no CRM read or write occurs.
+
 ---
 
 ## Email reputation & deliverability protections (the part most relevant to IT)
