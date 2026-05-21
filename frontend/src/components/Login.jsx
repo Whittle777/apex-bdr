@@ -3,12 +3,15 @@ import api from '../services/api';
 
 const Login = () => {
   const [loading, setLoading] = useState(false);
+  const [demoLoading, setDemoLoading] = useState(false);
   const [error, setError]     = useState('');
+  const [config, setConfig]   = useState({ demoMode: false, microsoftConfigured: true });
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const msError = params.get('ms_error');
     if (msError) setError(decodeURIComponent(msError));
+    api.get('/auth/config').then(r => setConfig(r.data)).catch(() => {});
   }, []);
 
   const handleMicrosoftLogin = async () => {
@@ -20,6 +23,19 @@ const Login = () => {
     } catch (err) {
       setError(err.response?.data?.message || 'Failed to start sign-in. Please try again.');
       setLoading(false);
+    }
+  };
+
+  const handleDemoLogin = async () => {
+    setError('');
+    setDemoLoading(true);
+    try {
+      const res = await api.post('/auth/demo-login');
+      localStorage.setItem('token', res.data.token);
+      window.location.replace('/');
+    } catch (err) {
+      setError(err.response?.data?.message || 'Demo sign-in failed.');
+      setDemoLoading(false);
     }
   };
 
@@ -92,6 +108,36 @@ const Login = () => {
           </svg>
           {loading ? 'Redirecting to Microsoft…' : 'Sign in with Microsoft'}
         </button>
+
+        {config.demoMode && (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '18px 0 14px', color: 'var(--text-muted)', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.08em' }}>
+              <div style={{ flex: 1, height: 1, background: 'var(--border-subtle)' }} />
+              or
+              <div style={{ flex: 1, height: 1, background: 'var(--border-subtle)' }} />
+            </div>
+            <button
+              type="button"
+              onClick={handleDemoLogin}
+              disabled={demoLoading}
+              className="secondary"
+              style={{
+                width: '100%', padding: '11px',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                fontSize: '0.9rem', fontWeight: 600,
+                opacity: demoLoading ? 0.7 : 1,
+                border: '1px dashed var(--border-color)',
+                background: 'var(--bg-tertiary)',
+                color: 'var(--text-secondary)',
+              }}
+            >
+              {demoLoading ? 'Signing in…' : '🎭 Demo Sign In (no Microsoft required)'}
+            </button>
+            <p style={{ textAlign: 'center', marginTop: 10, fontSize: '0.7rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+              Demo mode is enabled on this deployment. Disable by removing <code>DEMO_MODE</code> from env vars.
+            </p>
+          </>
+        )}
 
         <p style={{ textAlign: 'center', marginTop: 20, fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
           You'll be redirected to Microsoft to sign in with your work account.

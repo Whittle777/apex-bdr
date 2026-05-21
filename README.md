@@ -45,6 +45,7 @@ Optional (activate corresponding features):
 - `AWS_SQS_*` — AWS SQS integration
 - `REDIS_HOST / REDIS_PORT` — Redis rate limiting
 - `TTS_PROVIDER_API_KEY` — ElevenLabs / Azure Speech TTS
+- `DEMO_MODE=true` — exposes a "Demo Sign In" button on the login page that mints a JWT for a synthetic demo user. Lets reviewers (e.g. IT) walk through the app without Microsoft SSO. **Disable in production once your tenant admin has granted consent.**
 
 ---
 
