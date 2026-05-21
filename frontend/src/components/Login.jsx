@@ -5,12 +5,14 @@ const Login = () => {
   const [loading, setLoading] = useState(false);
   const [demoLoading, setDemoLoading] = useState(false);
   const [error, setError]     = useState('');
+  const [adminConsentOk, setAdminConsentOk] = useState(false);
   const [config, setConfig]   = useState({ demoMode: false, microsoftConfigured: true });
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const msError = params.get('ms_error');
     if (msError) setError(decodeURIComponent(msError));
+    if (params.get('ms_admin_consent') === 'ok') setAdminConsentOk(true);
     api.get('/auth/config').then(r => setConfig(r.data)).catch(() => {});
   }, []);
 
@@ -86,6 +88,19 @@ const Login = () => {
             color: 'var(--status-danger)', fontSize: '0.85rem', lineHeight: 1.5,
           }}>
             {error}
+          </div>
+        )}
+
+        {adminConsentOk && (
+          <div style={{
+            padding: '12px 16px', marginBottom: 20,
+            background: 'var(--status-success-dim, rgba(34,197,94,0.1))',
+            border: '1px solid var(--status-success-border, rgba(34,197,94,0.3))',
+            borderRadius: 'var(--radius-sm)',
+            color: 'var(--status-success, #22c55e)', fontSize: '0.85rem', lineHeight: 1.55,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 4 }}>✓ Admin consent granted</div>
+            Apex BDR is now approved for your organization. Your BDR reps can sign in below — no further action needed from IT.
           </div>
         )}
 

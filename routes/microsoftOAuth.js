@@ -64,11 +64,19 @@ router.post('/start', (req, res) => {
 
 // ── GET /auth/microsoft/callback ──────────────────────────────────────────────
 router.get('/callback', async (req, res) => {
-  const { code, state, error, error_description } = req.query;
+  const { code, state, error, error_description, admin_consent, tenant } = req.query;
 
   if (error) {
     const msg = encodeURIComponent(error_description || error);
     return res.redirect(`${FRONTEND_URL}/login?ms_error=${msg}`);
+  }
+
+  // Admin-consent flow lands here with ?admin_consent=True&tenant=<tid> after
+  // a tenant admin approves the app. There is no auth-code exchange — Microsoft
+  // has already recorded the consent on its side. Show the admin a friendly
+  // confirmation instead of the OAuth state-mismatch error.
+  if (admin_consent === 'True' || admin_consent === 'true') {
+    return res.redirect(`${FRONTEND_URL}/login?ms_admin_consent=ok&tenant=${encodeURIComponent(tenant || '')}`);
   }
 
   const stateData = pendingStates.get(state);
