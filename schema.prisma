@@ -119,7 +119,7 @@ model Sequence {
 model SequenceStep {
   id              Int             @id @default(autoincrement())
   sequenceId      Int
-  sequence        Sequence        @relation(fields: [sequenceId], references: [id])
+  sequence        Sequence        @relation(fields: [sequenceId], references: [id], onDelete: Cascade)
   order           Int
   stepType        String          @default("AUTO_EMAIL")
   delayDays       Int

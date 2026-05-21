@@ -222,8 +222,9 @@ const SequenceManager = () => {
       fetchSequences();
       toast(`"${seq.name}" deleted`, 'info', 2200);
     } catch (err) {
-      console.error(err);
-      toast('Failed to delete sequence', 'error');
+      console.error('[SequenceManager] deleteSequence failed', err);
+      const msg = err.response?.data?.details || err.response?.data?.error || err.response?.data?.message || err.message || 'Failed to delete sequence';
+      toast(msg, 'error', 6000);
     }
   };
 

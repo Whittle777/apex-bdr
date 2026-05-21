@@ -67,7 +67,14 @@ exports.deleteSequence = async (req, res) => {
     });
     res.json(sequence);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to delete sequence' });
+    // Surface the real Prisma error so foreign-key / constraint issues aren't
+    // hidden behind a generic message. See createSequence for the same pattern.
+    console.error('[deleteSequence] failed', error);
+    res.status(500).json({
+      error: 'Failed to delete sequence',
+      details: error.message,
+      code: error.code,
+    });
   }
 };
 
