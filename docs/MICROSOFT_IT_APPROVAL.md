@@ -118,7 +118,7 @@ C3.ai's `@c3.ai` sender reputation is protected by multiple layers:
 - **OAuth state parameter** with 10-minute TTL prevents CSRF on the redirect.
 - **Session JWTs** signed with a secret held only in Railway env vars; 30-day expiry; not refreshable (rep must re-sign with Microsoft when expired).
 - **Tracking pixel, unsubscribe handler, and all webhook endpoints are public-by-design** but signed/validated; no privileged operations exposed publicly.
-- **Source code available for review.** Henry can grant read access to the private GitHub repo (`henry-whittle-C3/apex-bdr`) on request.
+- **Source code available for review.** Henry can grant read access to the private GitHub repo on request.
 
 ---
 
