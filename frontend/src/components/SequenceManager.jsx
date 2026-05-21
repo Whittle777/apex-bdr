@@ -193,12 +193,19 @@ const SequenceManager = () => {
 
   const createSequence = async (e) => {
     e.preventDefault();
-    if (!newSeqName.trim()) return;
-    const name = newSeqName.trim();
+    // If the user didn't type anything, fall back to a default name they can
+    // rename later. Number suffix keeps multiple defaults distinguishable.
+    let name = newSeqName.trim();
+    if (!name) {
+      const untitledCount = sequences.filter(s => /^Untitled sequence(\s|$)/i.test(s.name || '')).length;
+      name = untitledCount === 0 ? 'Untitled sequence' : `Untitled sequence ${untitledCount + 1}`;
+    }
     try {
-      await api.post('/sequences', { name });
+      const res = await api.post('/sequences', { name });
       setNewSeqName('');
-      fetchSequences();
+      await fetchSequences();
+      // Select the newly created sequence so the user can immediately rename / edit it
+      if (res?.data?.id) setActiveSequenceId(res.data.id);
       toast(`"${name}" created`, 'success', 2200);
     } catch (err) {
       console.error('[SequenceManager] createSequence failed', err);
@@ -627,12 +634,12 @@ const SequenceManager = () => {
 
         <form onSubmit={createSequence} style={{ marginTop: 12, marginBottom: 14, display: 'flex', gap: 8 }}>
           <input
-            placeholder="New Sequence..."
+            placeholder="New sequence name (optional)"
             value={newSeqName}
             onChange={(e) => setNewSeqName(e.target.value)}
             style={{ flex: 1 }}
           />
-          <button type="submit" style={{ padding: '8px' }}>+</button>
+          <button type="submit" style={{ padding: '8px' }} title="Leave blank to create as 'Untitled sequence' — rename anytime">+</button>
         </form>
 
         {loading ? (
