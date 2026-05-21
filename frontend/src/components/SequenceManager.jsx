@@ -109,15 +109,13 @@ const SequenceManager = () => {
         setActiveSequenceId(seqRes.data[0].id);
       }
     } catch (err) {
-      console.error(err);
-      // Fallback data if DB fails
-      const fallbackSeq = [{ id: 1, name: 'Q1 Outbound Cold Leads' }, { id: 2, name: 'Inbound Trial Signups' }];
-      setSequences(fallbackSeq);
-      setAllSteps([
-        { id: 1, sequenceId: 1, order: 1, delayDays: 0, subject: 'Quick question about {{company}}', body: 'Hi {{firstName}},\n\nI was browsing your site and noticed...' },
-        { id: 2, sequenceId: 1, order: 2, delayDays: 3, subject: 'Re: Quick question about {{company}}', body: 'Following up on my previous note. Do you have 5 minutes to chat?' }
-      ]);
-      if (!activeSequenceId) setActiveSequenceId(1);
+      // Surface the real error — silent fallback used to mask DB/schema failures
+      // and replace them with fake sequences, which made created rows look "missing".
+      console.error('[SequenceManager] fetchSequences failed', err);
+      setSequences([]);
+      setAllSteps([]);
+      const msg = err.response?.data?.error || err.response?.data?.message || err.message || 'Failed to load sequences';
+      toast(msg, 'error', 6000);
     } finally {
       setLoading(false);
     }
@@ -203,8 +201,9 @@ const SequenceManager = () => {
       fetchSequences();
       toast(`"${name}" created`, 'success', 2200);
     } catch (err) {
-      console.error(err);
-      toast('Failed to create sequence', 'error');
+      console.error('[SequenceManager] createSequence failed', err);
+      const msg = err.response?.data?.error || err.response?.data?.details || err.response?.data?.message || err.message || 'Failed to create sequence';
+      toast(msg, 'error', 6000);
     }
   };
 
