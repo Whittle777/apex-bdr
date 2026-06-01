@@ -58,7 +58,7 @@ router.post('/start', (req, res) => {
     `&scope=${encodeURIComponent(SCOPES)}` +
     `&state=${state}` +
     `&response_mode=query` +
-    `&prompt=consent`;
+    `&prompt=select_account`;
 
   res.json({ url });
 });
