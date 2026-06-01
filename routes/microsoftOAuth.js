@@ -23,6 +23,7 @@ const REDIRECT_URI = `${APP_URL}/auth/microsoft/callback`;
 
 const MS_CLIENT_ID     = process.env.MICROSOFT_CLIENT_ID;
 const MS_CLIENT_SECRET = process.env.MICROSOFT_CLIENT_SECRET;
+const MS_TENANT        = process.env.MICROSOFT_TENANT_ID || 'common';
 
 const SCOPES = [
   'https://graph.microsoft.com/Mail.Send',
@@ -50,7 +51,7 @@ router.post('/start', (req, res) => {
   pendingStates.set(state, { createdAt: Date.now() });
 
   const url =
-    `https://login.microsoftonline.com/common/oauth2/v2.0/authorize` +
+    `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/authorize` +
     `?client_id=${encodeURIComponent(MS_CLIENT_ID)}` +
     `&response_type=code` +
     `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}` +
@@ -95,7 +96,7 @@ router.get('/callback', async (req, res) => {
       grant_type:    'authorization_code',
     });
     const tokenRes = await axios.post(
-      'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+      `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`,
       params.toString(),
       { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
     );
