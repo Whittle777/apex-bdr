@@ -963,7 +963,7 @@ const SequenceManager = () => {
                                         checked={!!stepForm.aiPersonalize}
                                         onChange={e => setStepForm({ ...stepForm, aiPersonalize: e.target.checked })}
                                       />
-                                      ✨ AI-personalize each email using prospect &amp; account research
+                                      ✨ AI-personalize each email using prospect &amp; account research (drafts go to review queue)
                                     </label>
                                     {stepForm.aiPersonalize && (
                                       <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -995,7 +995,7 @@ const SequenceManager = () => {
                                           />
                                         </div>
                                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
-                                          When enabled, the mailer rewrites the subject and body at send time using the prospect's research brief, the account research summary, and the step intent / voice guide above. The template below acts as a reference for the AI. Falls back to the plain template if the AI call fails.
+                                          When the step becomes due, the mailer drafts a personalized subject + body using the prospect's research brief, the account research summary, and the intent / voice guide above — then queues it in the <a href="/hitl" style={{ color: 'var(--accent-secondary)' }}>AI Review Queue</a>. The email is not sent until you approve it; the enrollment stays paused in the meantime. You can edit, regenerate, or skip the step from the review screen.
                                         </div>
                                       </div>
                                     )}

@@ -214,36 +214,17 @@ async function createPersonalizedDraft(enrollment, step) {
  * If step.aiPersonalize is true, instead of sending, generates a draft for HITL review.
  */
 async function sendStepEmail(enrollment, step) {
-  const ownerId = enrollment.sequence?.userId;
-
-  let subject;
-  let body;
-
+  // AI-personalized steps go through HITL review — generate the draft,
+  // pause the enrollment, and queue for human approval. The cron will
+  // resume the enrollment after approval and the approve endpoint sends.
   if (step.aiPersonalize) {
-    // Pull the prospect record fresh so we have researchBrief + linked account
-    // (the enrollment's nested prospect is a slim include and may not carry them).
-    const prospect = await prisma.prospect.findUnique({
-      where: { id: enrollment.prospectId },
-      include: { account: true },
-    });
-    try {
-      const draft = await personalize({ step, prospect, account: prospect.account });
-      subject = draft.subject;
-      body    = draft.body;
-    } catch (err) {
-      console.warn(`[Sequence Mailer] AI personalization failed for prospect ${prospect.id} step ${step.id}: ${err.message}. Falling back to template.`);
-      subject = interpolate(step.subject, prospect);
-      body    = interpolate(step.body, prospect);
-    }
-    // Use the freshly-loaded prospect for the rest of the flow
-    enrollment = { ...enrollment, prospect };
-  } else {
-    const { prospect } = enrollment;
-    subject = interpolate(step.subject, prospect);
-    body    = interpolate(step.body, prospect);
+    return await createPersonalizedDraft(enrollment, step);
   }
 
   const { prospect } = enrollment;
+  const ownerId = enrollment.sequence?.userId;
+  const subject = interpolate(step.subject, prospect);
+  const body    = interpolate(step.body, prospect);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
   const htmlBody = `${body.replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;

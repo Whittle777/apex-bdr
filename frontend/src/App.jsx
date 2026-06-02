@@ -98,6 +98,7 @@ const NAV = [
     links: [
       { path: '/analytics',     label: 'Analytics',  icon: '📊', desc: 'Your pipeline health & activity metrics (G+A)' },
       { path: '/research',      label: 'Research',   icon: '🔬', desc: 'Upload a prospect list and generate AI research briefs' },
+      { path: '/hitl',          label: 'Review Queue', icon: '🛡️', desc: 'Approve, edit, or regenerate AI-personalized sequence emails (G+R)' },
     ],
   },
   {
@@ -111,7 +112,6 @@ const NAV = [
     label: 'Labs',
     isLabs: true,
     links: [
-      { path: '/hitl',          label: 'AI Review Queue', icon: '🛡️', desc: 'Human-in-the-loop review for AI-drafted emails — not yet active' },
       { path: '/voice-fleet',   label: 'Voice Fleet',     icon: '🎙️', desc: 'Autonomous AI voice agents — not yet active' },
       { path: '/deliverability',label: 'Deliverability',  icon: '📡', desc: 'Domain health · SPF, DKIM & inbox placement' },
     ],
@@ -157,7 +157,7 @@ const NAV_ACTIONS = [
   { icon:'🤝', label:'Success Plans',   path:'/success-plans',    sub:'Mutual action plans with buyers' },
   { icon:'?',  label:'Take a tour',     path:null,                sub:'Guided walkthrough of the app' },
   { icon:'🎬', label:'Demo mode',       path:'__demo__',          sub:'Load a full realistic demo dataset in one click' },
-  { icon:'🛡️', label:'AI Review Queue', path:'/hitl',             sub:'Labs — human-in-the-loop review for AI-drafted emails' },
+  { icon:'🛡️', label:'Review Queue',    path:'/hitl',             sub:'Approve AI-personalized sequence emails before they send' },
   { icon:'🎙️', label:'Voice Fleet',     path:'/voice-fleet',      sub:'Labs — autonomous AI voice agents' },
   { icon:'📡', label:'Deliverability',  path:'/deliverability',   sub:'Labs — domain health & inbox placement' },
 ];
@@ -333,7 +333,15 @@ function AppInner() {
   useEffect(() => {
     api.get('/prospects').then(r => setAllProspects(r.data || [])).catch(() => {});
     // Live badge counts
-    api.get('/hitl/queue').then(r => setHitlCount((r.data || []).length)).catch(() => {});
+    // Badge counts both in-memory legacy queue items and DB-backed personalized drafts
+    Promise.allSettled([
+      api.get('/hitl/queue'),
+      api.get('/email-activities/drafts'),
+    ]).then(([h, d]) => {
+      const legacy = h.status === 'fulfilled' ? (h.value.data || []).length : 0;
+      const drafts = d.status === 'fulfilled' ? (d.value.data || []).length : 0;
+      setHitlCount(legacy + drafts);
+    });
     api.get('/sequences').then(r => {
       const seqs = r.data || [];
       const total = seqs.reduce((acc, s) =>
@@ -433,6 +441,7 @@ function AppInner() {
                 const badge =
                   link.path === '/sequence-manager' && activeEnrollments > 0 ? activeEnrollments :
                   link.path === '/tasks' && pendingTaskCount > 0 ? pendingTaskCount :
+                  link.path === '/hitl' && hitlCount > 0 ? hitlCount :
                   researchBadge;
                 const researchRunning = link.path === '/research' && researchJobId && researchJob && researchJob.status === 'running';
                 const showSetupBadge = link.path === '/integrations' && setupIncomplete;
