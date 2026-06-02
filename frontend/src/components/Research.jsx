@@ -302,7 +302,8 @@ function AccountResearchPanel() {
       setPreview(rows);
       const res = await api.post('/accounts/research-upload', { rows });
       setResult(res.data);
-      toast(`Saved research for ${res.data.updated + res.data.created} account${(res.data.updated + res.data.created) !== 1 ? 's' : ''}`, 'success');
+      const total = res.data.updated + res.data.created;
+      toast(`Appended research to ${total} account${total !== 1 ? 's' : ''}`, 'success');
     } catch (err) {
       setError(err.response?.data?.message || err.message || 'Failed to upload account research.');
     } finally {
@@ -329,7 +330,7 @@ function AccountResearchPanel() {
         marginBottom: 16,
         lineHeight: 1.55,
       }}>
-        Upload a CSV with one row per account: a <strong>company name</strong> column and a <strong>research</strong> column. We'll save the research onto each matching Account, creating any that don't exist yet. Subsequent prospect briefs at those companies will use this context.
+        Upload a CSV with one row per account: a <strong>company name</strong> column and a <strong>research</strong> column. We'll <strong>append</strong> the new research to each matching Account (with a dated header), preserving anything already there. Accounts that don't exist yet are created. Subsequent prospect briefs at those companies will use the full accumulated context.
       </div>
 
       {!result && (
@@ -384,11 +385,11 @@ function AccountResearchPanel() {
           }}>
             <div>
               <div style={{ fontSize: '0.95rem', fontWeight: 700 }}>
-                {result.updated} updated · {result.created} created
+                {result.updated} appended · {result.created} created
                 {result.skipped > 0 && <span style={{ color: 'var(--text-muted)' }}> · {result.skipped} skipped</span>}
               </div>
               <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: 2 }}>
-                These accounts now feed context into every prospect brief generated for their employees.
+                Existing research was preserved — new content was added on top with today's date.
               </div>
             </div>
             <button className="btn-secondary" onClick={handleReset}>Upload another file</button>

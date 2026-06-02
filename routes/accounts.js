@@ -302,10 +302,11 @@ router.delete('/:id/link-prospect/:prospectId', async (req, res) => {
   }
 });
 
-// POST /accounts/research-upload — bulk upsert account research summaries
+// POST /accounts/research-upload — bulk APPEND account research summaries.
 // Body: { rows: [{ name, researchSummary }] }
-// For each row: if an Account with matching name exists, update its
-// researchSummary; otherwise create a new Account with that name and summary.
+// For each row: if an Account exists, prepend the new research with a
+// dated header to the existing summary so prior context is preserved;
+// otherwise create a new Account with the research as its initial body.
 // Returns { updated, created, skipped }.
 router.post('/research-upload', async (req, res) => {
   try {
@@ -314,21 +315,30 @@ router.post('/research-upload', async (req, res) => {
       return res.status(400).json({ message: 'No rows provided' });
     }
 
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
     let updated = 0;
     let created = 0;
     let skipped = 0;
 
     for (const row of rows) {
       const name = (row?.name || '').trim();
-      const summary = (row?.researchSummary || '').trim();
-      if (!name || !summary) { skipped += 1; continue; }
+      const incoming = (row?.researchSummary || '').trim();
+      if (!name || !incoming) { skipped += 1; continue; }
 
       const existing = await prisma.account.findFirst({ where: { name } });
       if (existing) {
+        const prior = (existing.researchSummary || '').trim();
+        // Don't double-append if this exact research is already at the top.
+        const alreadyHasIt = prior.includes(incoming);
+        const newSummary = !prior
+          ? `[${today}]\n${incoming}`
+          : alreadyHasIt
+            ? prior
+            : `[${today}]\n${incoming}\n\n${prior}`;
         await prisma.account.update({
           where: { id: existing.id },
           data: {
-            researchSummary: summary,
+            researchSummary: newSummary,
             ...(req.userId ? { owners: { connect: [{ id: req.userId }] } } : {}),
           },
         });
@@ -337,7 +347,7 @@ router.post('/research-upload', async (req, res) => {
         await prisma.account.create({
           data: {
             name,
-            researchSummary: summary,
+            researchSummary: `[${today}]\n${incoming}`,
             ...(req.userId ? { owners: { connect: [{ id: req.userId }] } } : {}),
           },
         });
