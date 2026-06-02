@@ -23,9 +23,8 @@ const crypto = require('crypto');
 const { getDueEnrollments, recordStepSent } = require('./enrollmentService');
 const { personalize } = require('./emailPersonalizer');
 const hitlRouter = require('../routes/hitl');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 /**
  * Get a fresh Microsoft Graph access token for a user.
  * Uses the stored refresh token + shared Azure app credentials from env vars.

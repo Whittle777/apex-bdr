@@ -1,6 +1,6 @@
 require('dotenv').config();
 const express = require('express');
-const { PrismaClient } = require('@prisma/client');
+
 const cors = require('cors');
 const authRoutes = require('./routes/auth');
 const usersRoutes = require('./routes/users');
@@ -32,7 +32,7 @@ const { runReplyDetection } = require('./services/replyDetector');
 const http = require('http');
 const app = express();
 const PORT = process.env.PORT || 3000;
-const prisma = new PrismaClient();
+const prisma = require('./services/database');
 const server = http.createServer(app);
 
 // Middleware

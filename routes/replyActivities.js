@@ -9,13 +9,12 @@
 
 const express = require('express');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
+
 const { authenticateToken } = require('../middleware/auth');
 const { runReplyDetection, classifyReply } = require('../services/replyDetector');
 const { pauseForOoo, markReplied, optOutProspect } = require('../services/enrollmentService');
 
-const prisma = new PrismaClient();
-
+const prisma = require('../services/database');
 router.use(authenticateToken);
 
 // ── GET /sequence/:sequenceId ─────────────────────────────────────────────────

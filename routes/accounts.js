@@ -3,11 +3,10 @@ const router = express.Router();
 const multer = require('multer');
 const crypto = require('crypto');
 const { authenticateToken } = require('../middleware/auth');
-const { PrismaClient } = require('@prisma/client');
+
 const { parseAccountTracker, parseRaw, applyMapping } = require('../services/accountTrackerImporter');
 const { proposeMapping, ACCOUNT_FIELDS, FIELD_DESCRIPTIONS } = require('../services/headerMapper');
-const prisma = new PrismaClient();
-
+const prisma = require('../services/database');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 // In-memory cache of parsed uploads pending mapping confirmation.

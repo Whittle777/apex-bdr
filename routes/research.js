@@ -10,9 +10,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('../services/database');
 const { authenticateToken } = require('../middleware/auth');
 const { upsertProspectBatch } = require('../services/prospectBulk');
 const { runResearchJob } = require('../services/researchEngine');

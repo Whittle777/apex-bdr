@@ -3,8 +3,8 @@ const router = express.Router();
 const axios = require('axios'); // Added axios for verification tests
 const Anthropic = require('@anthropic-ai/sdk');
 const nodemailer = require('nodemailer');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('../services/database');
 const { authenticateToken } = require('../middleware/auth');
 
 router.use(authenticateToken);

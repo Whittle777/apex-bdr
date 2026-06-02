@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 async function logTrackingPixelEvent(prospectId, bento, trackingPixelData) {
   const shard = getShard(bento);
   return await prisma[shard].trackingPixelEvent.create({

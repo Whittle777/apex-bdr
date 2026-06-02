@@ -3,9 +3,8 @@ const router = express.Router();
 const axios = require('axios');
 const Anthropic = require('@anthropic-ai/sdk');
 const { GoogleGenAI } = require('@google/genai');
-const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
+const prisma = require('../services/database');
 const ELEVEN_BASE = 'https://api.elevenlabs.io/v1';
 
 // ─── Resolve ElevenLabs credentials ──────────────────────────────────────────

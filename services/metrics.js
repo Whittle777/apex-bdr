@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 class MetricsService {
   async getConversionRates() {
     // Example query to get conversion rates

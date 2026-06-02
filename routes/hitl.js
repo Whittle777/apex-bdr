@@ -1,8 +1,7 @@
 const express = require('express');
 const router = express.Router();
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('../services/database');
 // In-memory review queue for prototype (replace with DB-backed queue in production)
 let reviewQueue = [
   {

@@ -14,9 +14,8 @@ const router = express.Router();
 const axios = require('axios');
 const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('../services/database');
 const APP_URL      = process.env.APP_URL || `http://localhost:${process.env.PORT || 3000}`;
 const FRONTEND_URL = process.env.FRONTEND_URL || process.env.APP_URL || 'http://localhost:5175';
 const REDIRECT_URI = `${APP_URL}/auth/microsoft/callback`;

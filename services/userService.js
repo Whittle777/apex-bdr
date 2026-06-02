@@ -1,7 +1,6 @@
 const bcrypt = require('bcrypt');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 async function registerUser(email, password, name) {
   const hashedPassword = await bcrypt.hash(password, 10);
 

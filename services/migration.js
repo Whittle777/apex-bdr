@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('./database');
 const DoubleWriteStrategy = require('../doubleWriteStrategy');
 const config = require('../config');
 const BackupService = require('../services/backup');

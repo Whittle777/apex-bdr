@@ -1,9 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const wss = require('../websocketServer');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('../services/database');
 // In-memory store of currently active calls keyed by prospectId
 const activeCalls = new Map();
 

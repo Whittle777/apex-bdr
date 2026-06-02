@@ -1,7 +1,6 @@
 const axios = require('axios');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 async function getOAuthToken(provider, userId) {
   // Try to find a valid standard token record if one was established previously
   const tokenRecord = await prisma.oauthToken.findUnique({

@@ -15,10 +15,8 @@
  */
 const { GoogleGenAI } = require('@google/genai');
 const Anthropic = require('@anthropic-ai/sdk');
-const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
-
+const prisma = require('./database');
 const DEFAULTS = {
   geminiPro:   'gemini-2.5-pro',
   geminiFast:  'gemini-2.5-flash',

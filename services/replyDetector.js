@@ -18,15 +18,14 @@
 const axios = require('axios');
 const { ImapFlow } = require('imapflow');
 const { simpleParser } = require('mailparser');
-const { PrismaClient } = require('@prisma/client');
+
 const {
   pauseForOoo,
   markReplied,
   optOutProspect,
 } = require('./enrollmentService');
 
-const prisma = new PrismaClient();
-
+const prisma = require('./database');
 // In-memory last-check timestamps (survives only for the process lifetime — fine for dev)
 const lastCheckTimes = { microsoft: null, google: null };
 

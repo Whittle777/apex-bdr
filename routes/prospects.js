@@ -1,8 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const { GoogleGenAI } = require('@google/genai');
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('../services/database');
 const { authenticateToken } = require('../middleware/auth');
 const { createProspect, createProspectsBulk, getProspectById, getAllProspects, updateProspect, deleteProspect, getFilterChips, filterProspects, getTopOpportunities, recordWin, recordLoss, handleListUnsubscribe } = require('../controllers/prospectsController');
 

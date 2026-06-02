@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 /**
  * Enroll one or more prospects into a sequence.
  * Safe to call multiple times — uses upsert so re-enrolling a completed/opted-out

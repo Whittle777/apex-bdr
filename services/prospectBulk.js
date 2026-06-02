@@ -4,11 +4,10 @@
  * so callers (Prospects CSV import, Research upload, etc.) can reuse the
  * same accounts-and-ownership wiring.
  */
-const { PrismaClient } = require('@prisma/client');
+
 const { createProspectsBulk } = require('../controllers/prospectsController');
 
-const prisma = new PrismaClient();
-
+const prisma = require('./database');
 /**
  * @param {Object} opts
  * @param {Array<Object>} opts.prospects - parsed prospect rows

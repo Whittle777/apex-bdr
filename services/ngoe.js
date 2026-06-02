@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('./database');
 const { acquireLock, releaseLock } = require('./stateMachine');
 const { handleProspectStatusChange } = require('./eventHandlers');
 const { logTrackingPixelEvent, wrapLink } = require('./trackingPixelLogger');

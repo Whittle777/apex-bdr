@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('./database');
 const { analyzeSentiment } = require('./llm');
 
 async function analyzeOpenRates(messages) {

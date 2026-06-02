@@ -1,6 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
 
+const prisma = require('./database');
 class DealsService {
   async createDeal(dealData) {
     return await prisma.deal.create({ data: dealData });

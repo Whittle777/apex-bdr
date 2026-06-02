@@ -7,11 +7,10 @@
  * (owned by routes/research.js) drops job records after 1h.
  */
 const axios = require('axios');
-const { PrismaClient } = require('@prisma/client');
+
 const { generate } = require('./aiProvider');
 
-const prisma = new PrismaClient();
-
+const prisma = require('./database');
 const APIFY_ACTOR_ID = '2SyF0bVxmgGr8IVCZ'; // dev_fusion/linkedin-profile-scraper
 const APIFY_SYNC_URL = (token) =>
   `https://api.apify.com/v2/acts/${APIFY_ACTOR_ID}/run-sync-get-dataset-items?token=${encodeURIComponent(token)}`;

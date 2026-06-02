@@ -2,10 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { GoogleGenAI } = require('@google/genai');
 const Anthropic = require('@anthropic-ai/sdk');
-const { PrismaClient } = require('@prisma/client');
 
-const prisma = new PrismaClient();
-
+const prisma = require('../services/database');
 // ─── Resolve active AI provider ───────────────────────────────────────────────
 // Priority: Claude (DB cred) > Claude (env) > Gemini (DB cred) > Gemini (env)
 const resolveAIProvider = async () => {

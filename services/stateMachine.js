@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('./database');
 const redis = require('redis');
 
 async function handleProspectStatusChange(prospectId, bento, newStatus) {

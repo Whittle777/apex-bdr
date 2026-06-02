@@ -1,5 +1,5 @@
-const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
+
+const prisma = require('./database');
 const azureCommunicationService = require('./azureCommunicationService');
 
 async function createTeamsResourceAccount(userId, bento, isMock = false) {
