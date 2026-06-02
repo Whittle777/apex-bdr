@@ -7,7 +7,7 @@
     "start": "node scripts/dbPushWithRetry.js && node index.js",
     "dev": "nodemon index.js",
     "build": "cd frontend && npm install && npm run build",
-    "railway:deploy": "npm run build && npx prisma migrate deploy",
+    "railway:deploy": "npm run build",
     "postinstall": "prisma generate",
     "test": "dotenv -e .env.test -- npx prisma db push --skip-generate && dotenv -e .env.test -- jest"
   },
