@@ -769,7 +769,17 @@ const Integrations = () => {
       {/* Email / Telephony Providers */}
       <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 12 }}>Email &amp; Telephony</div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 16 }}>
-        {PROVIDERS.map((p) => {
+        {PROVIDERS.filter((p) => {
+          // Hide the Gmail card once Microsoft 365 is connected — sending
+          // goes through Outlook in that case, so the Gmail card is just
+          // noise. Show it again only if the user disconnects Microsoft.
+          if (p.key === 'google') {
+            const msConnected = integrations.some(i => i.provider === 'microsoft');
+            const gmailConnected = integrations.some(i => i.provider === 'google');
+            return !msConnected || gmailConnected;
+          }
+          return true;
+        }).map((p) => {
           const integration = integrations.find(i => i.provider === p.key);
           const connected = !!integration;
           const editing = isConnecting === p.key;
