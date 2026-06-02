@@ -443,7 +443,14 @@ const SequenceManager = () => {
   const handleEmailReschedule = async (item) => {
     if (!rescheduleDate) return;
     try {
-      await api.patch(`/email-activities/enrollment/${item.enrollmentId}/reschedule`, { scheduledFor: rescheduleDate });
+      // datetime-local input gives a local-time string with no timezone
+      // suffix. new Date() in the browser interprets it as local, and
+      // .toISOString() converts to a proper UTC ISO string the backend can
+      // store unambiguously. Without this, the backend (running in UTC)
+      // would parse "2026-06-02T14:00" AS UTC, shifting the time wrong on
+      // every save.
+      const isoUtc = new Date(rescheduleDate).toISOString();
+      await api.patch(`/email-activities/enrollment/${item.enrollmentId}/reschedule`, { scheduledFor: isoUtc });
       toast('Email rescheduled', 'success', 2000);
       setReschedulingKey(null);
       setRescheduleDate('');
@@ -475,7 +482,9 @@ const SequenceManager = () => {
   const handleCallReschedule = async (item) => {
     if (!callRescheduleDate) return;
     try {
-      await api.patch(`/call-activities/enrollment/${item.enrollmentId}/reschedule`, { scheduledFor: callRescheduleDate });
+      // Same local-time → UTC ISO conversion as email reschedule.
+      const isoUtc = new Date(callRescheduleDate).toISOString();
+      await api.patch(`/call-activities/enrollment/${item.enrollmentId}/reschedule`, { scheduledFor: isoUtc });
       toast('Call rescheduled', 'success', 2000);
       setCallReschedulingKey(null);
       setCallRescheduleDate('');
