@@ -553,12 +553,77 @@ async function runDueSequenceEmails() {
     }
   }
 
+  // After the enrollment-driven send pass, also clear any approved
+  // drafts whose scheduled send time has arrived. This runs independent
+  // of enrollment.nextStepDue so a draft that was approved after its
+  // original send time (or one created before the new flow that cleared
+  // nextStepDue) still gets sent on the next cron tick.
+  const approvedResults = await sendDueApprovedDrafts();
+  results.sent += approvedResults.sent;
+  results.failed += approvedResults.failed;
+  results.errors.push(...approvedResults.errors);
+
   return results;
+}
+
+/**
+ * Pick up every EmailActivity with status='approved' whose scheduledFor
+ * has passed (or is null — treated as "send now") and ship it.
+ *
+ * This is the primary send mechanism for AI-personalized steps after the
+ * pre-draft → human-approve flow. It's intentionally driven by the draft
+ * row's status rather than enrollment.nextStepDue, so approvals are
+ * honoured even when the enrollment was paused in a prior version of the
+ * flow or its nextStepDue was cleared.
+ */
+async function sendDueApprovedDrafts() {
+  const result = { sent: 0, failed: 0, errors: [] };
+  const drafts = await prisma.emailActivity.findMany({
+    where: {
+      status: 'approved',
+      OR: [
+        { scheduledFor: null },
+        { scheduledFor: { lte: new Date() } },
+      ],
+    },
+    include: {
+      enrollment: { include: { sequence: true } },
+      sequenceStep: true,
+      prospect: true,
+    },
+    orderBy: { scheduledFor: 'asc' }, // soonest-due first
+  });
+
+  for (const draft of drafts) {
+    if (!draft.enrollment || !draft.sequenceStep) continue;
+    try {
+      const enrollment = {
+        ...draft.enrollment,
+        sequence: draft.enrollment.sequence,
+        prospect: draft.prospect,
+      };
+      await sendApprovedDraft(enrollment, draft.sequenceStep, draft);
+      result.sent += 1;
+    } catch (err) {
+      result.failed += 1;
+      result.errors.push({ draftId: draft.id, message: err.message });
+      // Don't flip the draft's status — leave it as 'approved' so the
+      // next cron pass retries. If it fails persistently we surface that
+      // in the logs.
+      console.error(`[Approved Send] draft ${draft.id} failed: ${err.message}`);
+    }
+  }
+
+  if (result.sent > 0 || result.failed > 0) {
+    console.log(`[Approved Send] sent=${result.sent} failed=${result.failed}`);
+  }
+  return result;
 }
 
 module.exports = {
   sendStepEmail,
   runDueSequenceEmails,
+  sendDueApprovedDrafts,
   interpolate,
   createPersonalizedDraft,
   prepareUpcomingDrafts,

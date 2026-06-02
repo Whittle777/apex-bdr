@@ -1477,20 +1477,25 @@ const SequenceManager = () => {
             {/* ── EMAILS TAB ─────────────────────────────────────────────────── */}
             {activeTab === 'emails' && (() => {
               const EMAIL_STATUS_FILTERS = [
-                { key: 'all',       label: 'All' },
-                { key: 'scheduled', label: 'Scheduled' },
-                { key: 'sent',      label: 'Sent' },
-                { key: 'opened',    label: 'Opened' },
-                { key: 'failed',    label: 'Failed' },
-                { key: 'cancelled', label: 'Cancelled' },
+                { key: 'all',           label: 'All' },
+                { key: 'scheduled',     label: 'Scheduled' },
+                { key: 'draft_pending', label: 'Awaiting review' },
+                { key: 'approved',      label: 'Approved' },
+                { key: 'sent',          label: 'Sent' },
+                { key: 'opened',        label: 'Opened' },
+                { key: 'failed',        label: 'Failed' },
+                { key: 'cancelled',     label: 'Cancelled' },
               ];
 
               const STATUS_PILL = {
-                scheduled: { bg: 'var(--status-info-dim,rgba(59,130,246,0.12))',    color: 'var(--status-info)',    border: 'rgba(59,130,246,0.3)'  },
-                sent:      { bg: 'var(--bg-tertiary)',                               color: 'var(--text-secondary)', border: 'var(--border-color)'   },
-                opened:    { bg: 'var(--status-success-dim)',                        color: 'var(--status-success)', border: 'rgba(34,197,94,0.3)'   },
-                failed:    { bg: 'var(--status-danger-dim)',                         color: 'var(--status-danger)',  border: 'rgba(239,68,68,0.3)'   },
-                cancelled: { bg: 'var(--bg-tertiary)',                               color: 'var(--text-muted)',     border: 'var(--border-subtle)'  },
+                scheduled:     { bg: 'var(--status-info-dim,rgba(59,130,246,0.12))',    color: 'var(--status-info)',    border: 'rgba(59,130,246,0.3)'  },
+                draft_pending: { bg: 'rgba(167,139,250,0.12)',                          color: '#a78bfa',               border: 'rgba(167,139,250,0.3)' },
+                approved:      { bg: 'rgba(56,189,248,0.12)',                           color: '#38bdf8',               border: 'rgba(56,189,248,0.3)'  },
+                sent:          { bg: 'var(--bg-tertiary)',                               color: 'var(--text-secondary)', border: 'var(--border-color)'   },
+                opened:        { bg: 'var(--status-success-dim)',                        color: 'var(--status-success)', border: 'rgba(34,197,94,0.3)'   },
+                failed:        { bg: 'var(--status-danger-dim)',                         color: 'var(--status-danger)',  border: 'rgba(239,68,68,0.3)'   },
+                cancelled:     { bg: 'var(--bg-tertiary)',                               color: 'var(--text-muted)',     border: 'var(--border-subtle)'  },
+                rejected:      { bg: 'var(--status-danger-dim)',                         color: 'var(--status-danger)',  border: 'rgba(239,68,68,0.3)'   },
               };
 
               const filtered = emailStatusFilter === 'all'
@@ -1609,9 +1614,14 @@ const SequenceManager = () => {
                             const key = emailKey(item);
                             const pill = STATUS_PILL[item.status] || STATUS_PILL.sent;
                             const prospect = item.prospect;
+                            // For drafts and approved-but-unsent items, show
+                            // scheduledFor (when it'll go out) instead of
+                            // createdAt, so the user sees the actionable date.
                             const dateVal = item.type === 'scheduled'
                               ? item.scheduledFor
-                              : (item.sentAt || item.createdAt);
+                              : (item.status === 'draft_pending' || item.status === 'approved')
+                                ? (item.scheduledFor || item.createdAt)
+                                : (item.sentAt || item.createdAt);
                             const isRescheduling = reschedulingKey === key;
 
                             return (

@@ -140,20 +140,31 @@ const HITLReviewView = () => {
     const remaining = queue.filter(i => i.id !== currentId);
     setSelectedId(remaining[0]?.id || null);
 
-    const toastMsg = {
-      'accepted':            `Approved email to ${prospectLabel}`,
-      'rejected':            `Rejected draft for ${prospectLabel}`,
-      'edited-and-accepted': `Edited & sent to ${prospectLabel}`,
-      'escalated':           `Escalated ${prospectLabel} for manual review`,
-    }[action];
-    if (toastMsg) toast(toastMsg, action === 'rejected' ? 'warning' : 'success');
+    const rejectedMsg = `Rejected draft for ${prospectLabel}`;
+    const escalatedMsg = `Escalated ${prospectLabel} for manual review`;
+    if (action === 'rejected') toast(rejectedMsg, 'warning');
+    else if (action === 'escalated') toast(escalatedMsg, 'success');
 
     try {
       if (wasDraft) {
         // Real EmailActivity draft path
         if (action === 'accepted' || action === 'edited-and-accepted') {
           const body = { editedSubject, editedBody: editedContent };
-          await api.post(`/email-activities/${draftId}/approve`, body);
+          const { data } = await api.post(`/email-activities/${draftId}/approve`, body);
+          // Tailor the toast to what actually happened on the backend:
+          //   - status === 'sent'    → went out immediately (was overdue)
+          //   - status === 'approved' + scheduledFor in the future → queued
+          //   - sendError present    → immediate send failed; cron will retry
+          if (data?.sendError) {
+            toast(`Approved for ${prospectLabel} — immediate send failed, will retry: ${data.sendError}`, 'warning', 5000);
+          } else if (data?.status === 'sent') {
+            toast(`Sent to ${prospectLabel}`, 'success');
+          } else if (data?.scheduledFor) {
+            const when = new Date(data.scheduledFor).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' });
+            toast(`Approved for ${prospectLabel} — will send ${when}`, 'success', 4000);
+          } else {
+            toast(`Approved email to ${prospectLabel}`, 'success');
+          }
         } else if (action === 'rejected') {
           await api.post(`/email-activities/${draftId}/reject`, { skipStep: false });
         } else if (action === 'escalated') {

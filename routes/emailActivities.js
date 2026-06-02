@@ -172,10 +172,11 @@ router.post('/:id/approve', async (req, res) => {
     const finalBody    = editedBody    || draft.draftBody;
 
     // Approval flips the draft to 'approved' and persists any edits. The
-    // actual send is handled by the regular send cron when the
-    // enrollment's nextStepDue arrives — this preserves the original send
-    // timing chosen when the sequence was built.
-    await prisma.emailActivity.update({
+    // actual send is handled by sendDueApprovedDrafts on the next cron
+    // tick — this preserves the original send timing chosen when the
+    // sequence was built, while still guaranteeing delivery for drafts
+    // whose scheduledFor has already passed.
+    const updatedDraft = await prisma.emailActivity.update({
       where: { id },
       data: {
         subject: finalSubject,
@@ -184,18 +185,26 @@ router.post('/:id/approve', async (req, res) => {
       },
     });
 
-    // Make sure the enrollment is active (in case a prior reject paused it
-    // and the user came back to regenerate + approve).
+    // Ensure the enrollment is active and its nextStepDue mirrors the
+    // draft's scheduledFor. Older drafts may have been created in a
+    // version of the flow that cleared nextStepDue on pause — without
+    // this, the enrollment would be invisible to other parts of the UI.
     await prisma.sequenceEnrollment.update({
       where: { id: draft.enrollmentId },
-      data: { status: 'active', pausedAt: null, pausedReason: null },
+      data: {
+        status: 'active',
+        pausedAt: null,
+        pausedReason: null,
+        nextStepDue: draft.enrollment.nextStepDue || updatedDraft.scheduledFor || new Date(),
+      },
     });
 
     // If the scheduled send time has already passed (e.g., the user
-    // approved late), kick off a send pass immediately so the email goes
-    // out without waiting for the next cron tick.
+    // approved late), kick off the send right now so it doesn't have to
+    // wait for the next cron tick.
     let sentNow = false;
-    if (draft.scheduledFor && new Date(draft.scheduledFor) <= new Date()) {
+    let sendError = null;
+    if (updatedDraft.scheduledFor && new Date(updatedDraft.scheduledFor) <= new Date()) {
       const { sendApprovedDraft } = require('../services/sequenceMailer');
       try {
         const enrollment = {
@@ -203,14 +212,21 @@ router.post('/:id/approve', async (req, res) => {
           sequence: draft.enrollment.sequence,
           prospect: draft.prospect,
         };
-        await sendApprovedDraft(enrollment, draft.sequenceStep, { ...draft, subject: finalSubject, draftBody: finalBody });
+        await sendApprovedDraft(enrollment, draft.sequenceStep, updatedDraft);
         sentNow = true;
       } catch (err) {
+        sendError = err.message;
         console.error('[approve] immediate send failed:', err.message);
       }
     }
 
-    res.json({ ok: true, status: sentNow ? 'sent' : 'approved', scheduledFor: draft.scheduledFor });
+    res.json({
+      ok: true,
+      status: sentNow ? 'sent' : 'approved',
+      scheduledFor: updatedDraft.scheduledFor,
+      sendError, // surfaced when immediate send was attempted but failed;
+                 // the cron will retry on the next tick
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
