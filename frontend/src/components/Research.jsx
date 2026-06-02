@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import api from '../services/api';
 import { parseZoomInfoCsv } from '../utils/zoomInfoCsv';
 import { useIntegrations } from '../contexts/IntegrationContext';
+import { useResearch } from '../contexts/ResearchContext';
 import { useToast } from './Toast';
 
 const STATUS_STYLES = {
@@ -29,45 +30,23 @@ const StatusPill = ({ status }) => {
 
 export default function Research() {
   const { isConfigured } = useIntegrations();
+  const { activeJob: job, activeJobId, startJob, clearJob } = useResearch();
   const toast = useToast();
   const apifyReady = isConfigured('apify');
 
-  const [phase, setPhase] = useState('idle'); // idle | running | complete | error
-  const [job, setJob] = useState(null);       // current job snapshot
   const [error, setError] = useState(null);
   const [parsing, setParsing] = useState(false);
   const fileInputRef = useRef();
-  const pollRef = useRef();
 
-  const stopPolling = () => {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  };
-
-  useEffect(() => () => stopPolling(), []);
-
-  const startPolling = useCallback((jobId) => {
-    stopPolling();
-    const tick = async () => {
-      try {
-        const res = await api.get(`/research/jobs/${jobId}`);
-        setJob(res.data);
-        if (res.data.status === 'complete' || res.data.status === 'failed') {
-          stopPolling();
-          setPhase(res.data.status === 'complete' ? 'complete' : 'error');
-        }
-      } catch (err) {
-        // Job missing → backend probably restarted
-        stopPolling();
-        setError('Lost connection to the research job. The backend may have restarted.');
-        setPhase('error');
-      }
-    };
-    tick();
-    pollRef.current = setInterval(tick, 2000);
-  }, []);
+  // Derive phase from the context job so navigating back/forth shows the
+  // correct state without local sync logic.
+  const phase = !activeJobId
+    ? 'idle'
+    : job?.status === 'complete'
+      ? 'complete'
+      : job?.status === 'failed'
+        ? 'error'
+        : 'running';
 
   const handleFile = async (file) => {
     if (!file) return;
@@ -81,12 +60,10 @@ export default function Research() {
         return;
       }
       const res = await api.post('/research/upload', { prospects });
-      setPhase('running');
-      toast(`Researching ${res.data.prospectCount} prospect${res.data.prospectCount !== 1 ? 's' : ''}…`, 'info');
-      startPolling(res.data.jobId);
+      toast(`Researching ${res.data.prospectCount} prospect${res.data.prospectCount !== 1 ? 's' : ''} in the background…`, 'info');
+      startJob(res.data.jobId);
     } catch (err) {
       setError(err.response?.data?.message || err.message || 'Failed to start research job.');
-      setPhase('error');
     } finally {
       setParsing(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -94,10 +71,8 @@ export default function Research() {
   };
 
   const handleReset = () => {
-    stopPolling();
-    setJob(null);
+    clearJob();
     setError(null);
-    setPhase('idle');
   };
 
   const exportUrl = job ? `${api.defaults.baseURL || ''}/research/jobs/${job.id}/export` : null;
@@ -165,6 +140,10 @@ export default function Research() {
             <div style={{ color: '#f87171', marginTop: 14, fontSize: '0.85rem' }}>{error}</div>
           )}
         </div>
+      )}
+
+      {phase !== 'idle' && !job && (
+        <div style={{ padding: '32px 0', color: 'var(--text-muted)' }}>Loading research job…</div>
       )}
 
       {(phase === 'running' || phase === 'complete' || phase === 'error') && job && (

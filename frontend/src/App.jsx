@@ -20,6 +20,7 @@ import EmailSafety from './components/EmailSafety';
 import Research from './components/Research';
 import { ToastProvider } from './components/Toast';
 import { IntegrationProvider, useIntegrations } from './contexts/IntegrationContext';
+import { ResearchProvider, useResearch } from './contexts/ResearchContext';
 import TourOverlay, { useTourAutoStart, TOUR_LS_KEY } from './components/TourOverlay';
 import DemoMode from './components/DemoMode';
 import api from './services/api';
@@ -304,6 +305,7 @@ function AppInner() {
   const location = useLocation();
   const navigate = useNavigate();
   const { isConfigured } = useIntegrations();
+  const { activeJob: researchJob, activeJobId: researchJobId } = useResearch();
   const setupIncomplete = !isConfigured('claude') || !isConfigured('google') || !isConfigured('microsoft');
   const [tourOpen, setTourOpen] = useState(() => useTourAutoStart());
   const [demoOpen, setDemoOpen] = useState(false);
@@ -425,10 +427,14 @@ function AppInner() {
               </div>
               {section.links.map((link) => {
                 const isLabs = !!section.isLabs;
+                const researchBadge = (link.path === '/research' && researchJobId && researchJob)
+                  ? (researchJob.status === 'complete' ? '✓' : `${researchJob.completed}/${researchJob.total}`)
+                  : null;
                 const badge =
                   link.path === '/sequence-manager' && activeEnrollments > 0 ? activeEnrollments :
                   link.path === '/tasks' && pendingTaskCount > 0 ? pendingTaskCount :
-                  null;
+                  researchBadge;
+                const researchRunning = link.path === '/research' && researchJobId && researchJob && researchJob.status === 'running';
                 const showSetupBadge = link.path === '/integrations' && setupIncomplete;
                 const tourAttr =
                   link.path === '/'                 ? 'nav-dashboard'    :
@@ -459,7 +465,23 @@ function AppInner() {
                         soon
                       </span>
                     )}
-                    {badge ? <span className="nav-badge">{badge}</span> : null}
+                    {badge ? (
+                      <span
+                        className="nav-badge"
+                        style={researchRunning ? {
+                          background: 'rgba(56,189,248,0.15)',
+                          color: '#38bdf8',
+                          border: '1px solid rgba(56,189,248,0.3)',
+                          animation: 'pulse 2s ease-in-out infinite',
+                        } : researchBadge === '✓' ? {
+                          background: 'rgba(74,222,128,0.15)',
+                          color: '#4ade80',
+                          border: '1px solid rgba(74,222,128,0.3)',
+                        } : undefined}
+                      >
+                        {badge}
+                      </span>
+                    ) : null}
                     {showSetupBadge && (
                       <span style={{
                         marginLeft: 'auto', fontSize: '0.6rem', fontWeight: 700,
@@ -670,7 +692,9 @@ export default function App() {
   return (
     <ToastProvider>
       <IntegrationProvider>
-        <AppInner />
+        <ResearchProvider>
+          <AppInner />
+        </ResearchProvider>
       </IntegrationProvider>
     </ToastProvider>
   );
