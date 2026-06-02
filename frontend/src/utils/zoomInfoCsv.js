@@ -1,5 +1,56 @@
 import Papa from 'papaparse';
 
+const NAME_HEADERS = [
+  'Account Name', 'Company Name', 'Company', 'Account', 'Name', 'companyName',
+];
+const RESEARCH_HEADERS = [
+  'Research', 'Account Research', 'Brief', 'Summary', 'Account Summary',
+  'Notes', 'Context', 'researchSummary', 'Research Summary',
+];
+
+const pickHeader = (row, candidates) => {
+  for (const h of candidates) {
+    if (Object.prototype.hasOwnProperty.call(row, h) && row[h] != null && String(row[h]).trim() !== '') {
+      return String(row[h]).trim();
+    }
+  }
+  return '';
+};
+
+/**
+ * Parse an account-research CSV into [{ name, researchSummary }] rows.
+ * Tries known headers first; if none match, falls back to the first two
+ * columns positionally so freeform spreadsheets still work.
+ */
+export function parseAccountResearchCsv(file) {
+  return new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      transformHeader: (h) => h.trim(),
+      complete: (results) => {
+        try {
+          const headers = results.meta.fields || [];
+          const rows = results.data
+            .map((row) => {
+              let name = pickHeader(row, NAME_HEADERS);
+              let research = pickHeader(row, RESEARCH_HEADERS);
+              // Position fallback: if no header match, use first two columns.
+              if (!name && headers.length >= 1) name = String(row[headers[0]] ?? '').trim();
+              if (!research && headers.length >= 2) research = String(row[headers[1]] ?? '').trim();
+              return { name, researchSummary: research };
+            })
+            .filter((r) => r.name && r.researchSummary);
+          resolve(rows);
+        } catch (err) {
+          reject(err);
+        }
+      },
+      error: (err) => reject(err),
+    });
+  });
+}
+
 /**
  * Parse a ZoomInfo (or similar B2B export) CSV file into a normalised list
  * of prospect objects. Returns rows that have an email; everything else

@@ -25,7 +25,8 @@ router.use(authenticateToken);
 
 const ALLOWED = new Set([
   'name', 'domain', 'website', 'industry', 'subIndustry', 'revenue', 'employees',
-  'country', 'region', 'city', 'description', 'notes', 'status', 'tier',
+  'country', 'region', 'city', 'description', 'notes', 'researchSummary',
+  'status', 'tier',
   'techStack', 'tags', 'linkedInUrl', 'twitterUrl', 'foundedYear',
   'priorityTier', 'dealMotion', 'targetCloseDate', 'closeQuarter', 'useCases',
   'primaryStakeholder', 'backupStakeholders', 'warmIntroPaths', 'weeklyFocus',
@@ -297,6 +298,56 @@ router.delete('/:id/link-prospect/:prospectId', async (req, res) => {
     });
     res.json({ ok: true });
   } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// POST /accounts/research-upload — bulk upsert account research summaries
+// Body: { rows: [{ name, researchSummary }] }
+// For each row: if an Account with matching name exists, update its
+// researchSummary; otherwise create a new Account with that name and summary.
+// Returns { updated, created, skipped }.
+router.post('/research-upload', async (req, res) => {
+  try {
+    const rows = req.body?.rows;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return res.status(400).json({ message: 'No rows provided' });
+    }
+
+    let updated = 0;
+    let created = 0;
+    let skipped = 0;
+
+    for (const row of rows) {
+      const name = (row?.name || '').trim();
+      const summary = (row?.researchSummary || '').trim();
+      if (!name || !summary) { skipped += 1; continue; }
+
+      const existing = await prisma.account.findFirst({ where: { name } });
+      if (existing) {
+        await prisma.account.update({
+          where: { id: existing.id },
+          data: {
+            researchSummary: summary,
+            ...(req.userId ? { owners: { connect: [{ id: req.userId }] } } : {}),
+          },
+        });
+        updated += 1;
+      } else {
+        await prisma.account.create({
+          data: {
+            name,
+            researchSummary: summary,
+            ...(req.userId ? { owners: { connect: [{ id: req.userId }] } } : {}),
+          },
+        });
+        created += 1;
+      }
+    }
+
+    res.json({ updated, created, skipped });
+  } catch (err) {
+    console.error('[accounts/research-upload]', err);
     res.status(500).json({ message: err.message });
   }
 });

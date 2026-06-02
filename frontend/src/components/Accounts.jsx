@@ -95,7 +95,7 @@ const TagInput = ({ tags, onChange }) => {
 const EMPTY_FORM = {
   name: '', domain: '', website: '', industry: '', subIndustry: '',
   revenue: '', employees: '', country: '', region: '', city: '',
-  description: '', notes: '', status: 'prospect', tier: '',
+  description: '', notes: '', researchSummary: '', status: 'prospect', tier: '',
   techStack: '', tags: '[]', linkedInUrl: '', twitterUrl: '', foundedYear: '',
   // FY27 account-tracker fields
   priorityTier: '', dealMotion: '', targetCloseDate: '', closeQuarter: '',
@@ -405,6 +405,18 @@ const AccountDetail = ({ account, onSaved, onDeleted, allProspects }) => {
                   placeholder="What does this company do? Key context for outreach…"
                   rows={3}
                   style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid var(--border-color)', background: 'var(--bg-tertiary)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
+                />
+              </Field>
+            </Section>
+
+            <Section title="Account Research">
+              <Field label="">
+                <textarea
+                  value={form.researchSummary || ''}
+                  onChange={e => setForm(f => ({ ...f, researchSummary: e.target.value }))}
+                  placeholder="Account-level research. Pulled into every prospect brief generated for this company. Bulk-upload via Research → Account research."
+                  rows={5}
+                  style={{ width: '100%', resize: 'vertical', fontSize: '0.82rem', padding: '8px 10px', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(56,189,248,0.25)', background: 'rgba(56,189,248,0.04)', color: 'var(--text-primary)', fontFamily: 'inherit', lineHeight: 1.55, boxSizing: 'border-box' }}
                 />
               </Field>
             </Section>

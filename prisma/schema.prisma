@@ -40,6 +40,7 @@ model Account {
   city                String?
   description         String?
   notes               String?
+  researchSummary     String?    // AI / uploaded account-level research brief; flows into prospect brief generation
   status              String     @default("prospect") // prospect | customer | churned | partner
   tier                String?    // enterprise | mid-market | smb
   techStack           String?

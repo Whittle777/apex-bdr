@@ -70,6 +70,33 @@ function compactLinkedInForPrompt(data) {
 }
 
 /**
+ * Look up the most recent research summary for the account the prospect
+ * belongs to. Returns null if the company isn't in the Accounts table or
+ * has no summary saved.
+ */
+async function getAccountContext(companyName) {
+  if (!companyName) return null;
+  try {
+    const account = await prisma.account.findFirst({
+      where: { name: companyName },
+      select: { name: true, researchSummary: true, industry: true, useCases: true, description: true },
+    });
+    if (!account) return null;
+    const summary = account.researchSummary || account.description;
+    if (!summary && !account.useCases) return null;
+    return {
+      name: account.name,
+      summary: summary || null,
+      industry: account.industry || null,
+      useCases: account.useCases || null,
+    };
+  } catch (err) {
+    console.warn('[research] account context lookup failed:', err.message);
+    return null;
+  }
+}
+
+/**
  * Generate a natural-language research brief for one prospect.
  */
 async function generateBrief({ prospect, linkedInData }) {
@@ -78,6 +105,13 @@ async function generateBrief({ prospect, linkedInData }) {
     ? `LinkedIn profile (scraped):\n${JSON.stringify(compact, null, 2)}`
     : 'LinkedIn profile: not available.';
 
+  const accountContext = await getAccountContext(prospect.companyName);
+  const accountBlock = accountContext
+    ? `Account research (use this as authoritative context about the company):
+  Name: ${accountContext.name}
+${accountContext.industry ? `  Industry: ${accountContext.industry}\n` : ''}${accountContext.useCases ? `  Top use cases: ${accountContext.useCases}\n` : ''}${accountContext.summary ? `  Summary: ${accountContext.summary}\n` : ''}`
+    : 'Account research: none on file for this company.';
+
   const userPrompt = `Prospect:
   Name: ${prospect.firstName} ${prospect.lastName}
   Title: ${prospect.title || 'unknown'}
@@ -85,12 +119,16 @@ async function generateBrief({ prospect, linkedInData }) {
   Country / Region: ${prospect.country || '-'} / ${prospect.region || '-'}
   Industry / dept: ${prospect.techStack || '-'}
 
+${accountBlock}
+
 ${linkedInBlock}
 
 Write a 3–5 sentence research brief on this prospect for an SDR preparing
 outreach. Focus on:
  - Their role's likely priorities, pain points, and budget posture.
- - The company's situation, industry context, and any timely angle.
+ - The company's situation — anchor this in the Account research block
+   above when one is provided. Treat that block as authoritative; do not
+   contradict it.
  - Distinctive angles from LinkedIn (recent moves, notable past roles,
    shared backgrounds the SDR could namedrop) — only if present in the data.
 
