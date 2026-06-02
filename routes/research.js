@@ -29,7 +29,7 @@ setInterval(() => {
 
 const PROSPECT_FIELDS_FOR_JOB = [
   'firstName', 'lastName', 'email', 'companyName', 'title', 'phone',
-  'country', 'region', 'techStack', 'linkedIn',
+  'country', 'region', 'techStack', 'linkedIn', 'researchBrief',
 ];
 
 /**
@@ -56,6 +56,37 @@ router.post('/upload', async (req, res) => {
       userId: req.userId,
     });
 
+    // If the CSV included an "Account Research" column (e.g. from a Claude
+    // Enterprise run), dedupe by company name and append onto each Account's
+    // researchSummary — same date-prefixed append logic as /research-upload.
+    const accountResearchByCompany = new Map();
+    for (const p of prospects) {
+      const company = (p.companyName || '').trim();
+      const research = (p.accountResearch || '').trim();
+      if (!company || !research) continue;
+      if (!accountResearchByCompany.has(company)) {
+        accountResearchByCompany.set(company, research);
+      }
+    }
+    let accountResearchAppended = 0;
+    if (accountResearchByCompany.size > 0) {
+      const today = new Date().toISOString().slice(0, 10);
+      for (const [name, incoming] of accountResearchByCompany.entries()) {
+        const acct = await prisma.account.findFirst({ where: { name } });
+        if (!acct) continue;
+        const prior = (acct.researchSummary || '').trim();
+        if (prior.includes(incoming)) continue; // dedupe
+        const newSummary = !prior
+          ? `[${today}]\n${incoming}`
+          : `[${today}]\n${incoming}\n\n${prior}`;
+        await prisma.account.update({
+          where: { id: acct.id },
+          data: { researchSummary: newSummary },
+        });
+        accountResearchAppended += 1;
+      }
+    }
+
     const jobId = crypto.randomBytes(8).toString('hex');
     const job = {
       id: jobId,
@@ -66,6 +97,7 @@ router.post('/upload', async (req, res) => {
       startedAt: new Date().toISOString(),
       finishedAt: null,
       accountsCreated,
+      accountResearchAppended,
       prospectsCreated: count,
       apifyConfigured: !!apifyToken,
       items: prospects.map(p => ({
@@ -95,6 +127,7 @@ router.post('/upload', async (req, res) => {
       jobId,
       prospectCount: prospects.length,
       accountsCreated,
+      accountResearchAppended,
       apifyConfigured: !!apifyToken,
     });
   } catch (err) {

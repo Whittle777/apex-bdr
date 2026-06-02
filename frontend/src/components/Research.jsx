@@ -28,6 +28,105 @@ const StatusPill = ({ status }) => {
   );
 };
 
+// Pasteable prompt — kept in sync with docs/CLAUDE_RESEARCH_TEMPLATE.md
+const CLAUDE_PROMPT = `You are an SDR research analyst. I will give you a list of prospects. For
+each one, use your web research tools to investigate the prospect and the
+company they work at, then produce a row of CSV output.
+
+For each prospect, research:
+
+1. The company: industry, size, recent news, funding stage, strategic
+   priorities, public statements about technology investments, current
+   pain points or initiatives that map to AI / data / sales-tech, key
+   executives, any recent reorgs or budget signals.
+
+2. The prospect: their role and likely scope, their tenure at the company,
+   prior companies (especially if there are shared backgrounds with C3 AI
+   investors / customers / employees that could be a warm-intro angle),
+   recent LinkedIn or press activity, and what their role's priorities
+   typically look like at a company of this size and industry.
+
+3. Anything that makes outreach feel non-generic: a specific use case the
+   company would care about, a public quote from the prospect or a peer,
+   a recent product launch or hire that's relevant.
+
+Then output a single CSV block with EXACTLY these column headers — no
+extra columns, no commentary above or below the CSV, no markdown table:
+
+First Name,Last Name,Email,Company Name,Job Title,LinkedIn URL,Country,Person State,Research Brief,Account Research
+
+Rules for the CSV:
+- "Research Brief" must be a 3–5 sentence natural-language paragraph
+  about THIS specific prospect. No bullets. No preamble. Anchor in one
+  concrete detail you found in research — a recent move, a stated
+  priority, a peer quote — so the brief could not be sent to anyone else.
+- "Account Research" must be a 4–8 sentence paragraph about the company.
+  This will be reused across every prospect at the same company, so
+  write company-level context, not prospect-specific stuff.
+- If a column would be empty, leave the cell blank — do not write "N/A".
+- Properly escape commas and double quotes inside cells using CSV
+  conventions (wrap in double quotes; escape internal quotes by doubling).
+- One row per prospect.
+
+Take your time. Quality matters more than speed.
+
+PROSPECT LIST:
+<paste your prospect list here — one per line, ideally with name +
+ company + email + title + LinkedIn URL if you have them>`;
+
+function ClaudePromptHelper() {
+  const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(CLAUDE_PROMPT);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1800);
+    } catch {
+      /* clipboard may be unavailable */
+    }
+  };
+  return (
+    <div style={{
+      background: 'rgba(167,139,250,0.06)',
+      border: '1px solid rgba(167,139,250,0.2)',
+      borderRadius: 'var(--radius-md)',
+      padding: '12px 14px',
+      marginBottom: 16,
+      fontSize: '0.85rem',
+      lineHeight: 1.55,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ color: 'var(--text-secondary)' }}>
+          <strong style={{ color: '#a78bfa' }}>Using Claude Enterprise?</strong>{' '}
+          Paste this prompt into a Claude chat with your prospect list, let it research, and upload the CSV it returns — we'll skip our own LLM call and save the briefs directly.
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            type="button"
+            onClick={handleCopy}
+            style={{ padding: '6px 12px', background: 'rgba(167,139,250,0.18)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', fontWeight: 700, cursor: 'pointer', whiteSpace: 'nowrap' }}
+          >
+            {copied ? '✓ Copied' : '📋 Copy Claude prompt'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpen(o => !o)}
+            style={{ padding: '6px 12px', background: 'transparent', color: 'var(--text-muted)', border: '1px solid var(--border-soft)', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', fontWeight: 600, cursor: 'pointer', whiteSpace: 'nowrap' }}
+          >
+            {open ? 'Hide' : 'Preview'}
+          </button>
+        </div>
+      </div>
+      {open && (
+        <pre style={{ marginTop: 10, padding: 10, background: 'var(--bg-secondary)', border: '1px solid var(--border-soft)', borderRadius: 'var(--radius-sm)', fontSize: '0.72rem', lineHeight: 1.5, overflowX: 'auto', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', maxHeight: 320 }}>
+          {CLAUDE_PROMPT}
+        </pre>
+      )}
+    </div>
+  );
+}
+
 const TabButton = ({ active, onClick, children }) => (
   <button
     onClick={onClick}
@@ -135,42 +234,48 @@ function ProspectResearchPanel() {
       )}
 
       {phase === 'idle' && (
-        <div
-          onDragOver={(e) => { e.preventDefault(); }}
-          onDrop={(e) => {
-            e.preventDefault();
-            const f = e.dataTransfer.files?.[0];
-            if (f) handleFile(f);
-          }}
-          style={{
-            border: '2px dashed var(--border-medium)',
-            borderRadius: 'var(--radius-lg)',
-            padding: '48px 32px',
-            textAlign: 'center',
-            background: 'var(--bg-tertiary)',
-            cursor: 'pointer',
-          }}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          <div style={{ fontSize: '2rem', marginBottom: 8 }}>📄</div>
-          <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 4 }}>
-            {parsing ? 'Parsing CSV…' : 'Drop a ZoomInfo prospect CSV here or click to browse'}
+        <>
+          <ClaudePromptHelper />
+          <div
+            onDragOver={(e) => { e.preventDefault(); }}
+            onDrop={(e) => {
+              e.preventDefault();
+              const f = e.dataTransfer.files?.[0];
+              if (f) handleFile(f);
+            }}
+            style={{
+              border: '2px dashed var(--border-medium)',
+              borderRadius: 'var(--radius-lg)',
+              padding: '48px 32px',
+              textAlign: 'center',
+              background: 'var(--bg-tertiary)',
+              cursor: 'pointer',
+            }}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <div style={{ fontSize: '2rem', marginBottom: 8 }}>📄</div>
+            <div style={{ fontWeight: 700, fontSize: '1rem', marginBottom: 4 }}>
+              {parsing ? 'Parsing CSV…' : 'Drop a prospect CSV here or click to browse'}
+            </div>
+            <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', maxWidth: 560, margin: '0 auto' }}>
+              Standard ZoomInfo headers work out of the box. If your CSV already
+              includes a <strong>Research Brief</strong> column (e.g. from a Claude Enterprise
+              research run), we'll skip the LinkedIn scrape + LLM and save your
+              briefs directly. An <strong>Account Research</strong> column is appended onto each
+              matching Account.
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              style={{ display: 'none' }}
+              onChange={(e) => handleFile(e.target.files?.[0])}
+            />
+            {error && (
+              <div style={{ color: '#f87171', marginTop: 14, fontSize: '0.85rem' }}>{error}</div>
+            )}
           </div>
-          <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem' }}>
-            Uses First/Last Name, Email, Title, Company, and (optionally) LinkedIn URL.
-            We'll pull in any matching Account research automatically.
-          </div>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept=".csv"
-            style={{ display: 'none' }}
-            onChange={(e) => handleFile(e.target.files?.[0])}
-          />
-          {error && (
-            <div style={{ color: '#f87171', marginTop: 14, fontSize: '0.85rem' }}>{error}</div>
-          )}
-        </div>
+        </>
       )}
 
       {phase !== 'idle' && !job && (

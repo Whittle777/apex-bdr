@@ -172,18 +172,27 @@ async function runResearchJob(job, apifyToken) {
 
 async function processOne(job, item, idx, apifyToken) {
   try {
-    item.status = 'scraping';
-    let linkedInData = null;
-    if (item.prospect.linkedIn && apifyToken) {
-      linkedInData = await scrapeLinkedIn(item.prospect.linkedIn, apifyToken);
-      item.scraped = !!linkedInData;
-    }
+    let brief;
+    if (item.prospect.researchBrief && item.prospect.researchBrief.trim()) {
+      // CSV already supplied a brief (e.g. via Claude Enterprise webcrawl).
+      // Skip Apify + LLM entirely and just persist what the user provided.
+      item.status = 'imported';
+      brief = item.prospect.researchBrief.trim();
+      item.scraped = false;
+    } else {
+      item.status = 'scraping';
+      let linkedInData = null;
+      if (item.prospect.linkedIn && apifyToken) {
+        linkedInData = await scrapeLinkedIn(item.prospect.linkedIn, apifyToken);
+        item.scraped = !!linkedInData;
+      }
 
-    item.status = 'summarizing';
-    const brief = await generateBrief({
-      prospect: item.prospect,
-      linkedInData,
-    });
+      item.status = 'summarizing';
+      brief = await generateBrief({
+        prospect: item.prospect,
+        linkedInData,
+      });
+    }
 
     if (item.prospectId) {
       await prisma.prospect.update({
