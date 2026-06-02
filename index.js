@@ -26,7 +26,7 @@ const callsRouter = require('./routes/calls');
 const vmRecordingsRouter = require('./routes/vmRecordings');
 const researchRouter = require('./routes/research');
 const cron = require('node-cron');
-const { runDueSequenceEmails } = require('./services/sequenceMailer');
+const { runDueSequenceEmails, prepareUpcomingDrafts } = require('./services/sequenceMailer');
 const { runReplyDetection } = require('./services/replyDetector');
 
 const http = require('http');
@@ -105,6 +105,20 @@ cron.schedule('*/15 * * * *', async () => {
     }
   } catch (err) {
     console.error('[Sequence Mailer] Cron error:', err.message);
+  }
+});
+
+// ── Lookahead drafter ────────────────────────────────────────────────────────
+// Runs every 30 minutes — pre-generates AI personalized drafts for
+// upcoming sequence steps so the reviewer has time to approve them
+// before their scheduled send time. Sooner-scheduled sends are drafted
+// first. Configurable via DRAFT_LOOKAHEAD_DAYS (default 7) and
+// MAX_DRAFTS_PER_RUN (default 20).
+cron.schedule('*/30 * * * *', async () => {
+  try {
+    await prepareUpcomingDrafts();
+  } catch (err) {
+    console.error('[Pre-draft] Cron error:', err.message);
   }
 });
 

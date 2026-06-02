@@ -2,35 +2,12 @@ const express = require('express');
 const router = express.Router();
 
 const prisma = require('../services/database');
-// In-memory review queue for prototype (replace with DB-backed queue in production)
-let reviewQueue = [
-  {
-    id: 1, type: 'Email Draft', confidenceScore: 62, urgency: 'High',
-    status: 'pending',
-    prospectId: null,
-    draftContent: 'Hi Sarah, congratulations on the Series B...',
-    aiSummary: 'Drafted hyper-personalized outreach. Low confidence due to limited LinkedIn data.',
-    createdAt: new Date(Date.now() - 2 * 60 * 1000).toISOString()
-  },
-  {
-    id: 2, type: 'Call Script', confidenceScore: 78, urgency: 'Medium',
-    status: 'pending',
-    prospectId: null,
-    draftContent: '"Hi Marcus, this is Henry from Apex..."',
-    aiSummary: 'Generated tech-stack discovery call script. Moderate confidence.',
-    createdAt: new Date(Date.now() - 5 * 60 * 1000).toISOString()
-  },
-  {
-    id: 3, type: 'Email Draft', confidenceScore: 91, urgency: 'Low',
-    status: 'pending',
-    prospectId: null,
-    draftContent: 'Hi Jessica, thank you for your reply...',
-    aiSummary: 'Follow-up email ready for auto-execution. High confidence — positive reply detected.',
-    createdAt: new Date(Date.now() - 12 * 60 * 1000).toISOString()
-  }
-];
+// In-memory queue for ad-hoc HITL items pushed by other modules.
+// The durable source of truth for AI-personalized email drafts is the
+// EmailActivity table (status='draft_pending' / 'approved' / 'rejected').
+let reviewQueue = [];
 
-let nextId = 4;
+let nextId = 1;
 
 /**
  * Push an item to the in-memory HITL queue from other modules (e.g. sequenceMailer).

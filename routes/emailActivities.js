@@ -164,41 +164,53 @@ router.post('/:id/approve', async (req, res) => {
       },
     });
     if (!draft) return res.status(404).json({ message: 'Draft not found' });
-    if (draft.status !== 'draft_pending') return res.status(400).json({ message: `Draft status is "${draft.status}", expected "draft_pending"` });
+    if (draft.status !== 'draft_pending') {
+      return res.status(400).json({ message: `Draft status is "${draft.status}", expected "draft_pending"` });
+    }
 
     const finalSubject = editedSubject || draft.subject;
     const finalBody    = editedBody    || draft.draftBody;
 
-    // Hand off to sequenceMailer's send path with an inline override step.
-    // We build a synthetic step that the mailer will treat as non-AI to avoid recursion.
-    const { sendStepEmail } = require('../services/sequenceMailer');
-    const overrideStep = {
-      ...draft.sequenceStep,
-      aiPersonalize: false,            // critical — prevents recursion
-      subject: finalSubject,
-      body: finalBody,
-    };
-    // Reuse the enrollment, swap prospect onto it (mailer reads enrollment.prospect)
-    const enrollmentForSend = { ...draft.enrollment, prospect: draft.prospect };
-
-    const sentActivity = await sendStepEmail(enrollmentForSend, overrideStep);
-
-    // Mark the original draft row as resolved (point to the sent record)
+    // Approval flips the draft to 'approved' and persists any edits. The
+    // actual send is handled by the regular send cron when the
+    // enrollment's nextStepDue arrives — this preserves the original send
+    // timing chosen when the sequence was built.
     await prisma.emailActivity.update({
       where: { id },
       data: {
-        status: 'cancelled',
-        failureReason: `Approved → sent as EmailActivity ${sentActivity.id}`,
+        subject: finalSubject,
+        draftBody: finalBody,
+        status: 'approved',
       },
     });
 
-    // Resume the enrollment so subsequent steps can fire
+    // Make sure the enrollment is active (in case a prior reject paused it
+    // and the user came back to regenerate + approve).
     await prisma.sequenceEnrollment.update({
       where: { id: draft.enrollmentId },
       data: { status: 'active', pausedAt: null, pausedReason: null },
     });
 
-    res.json({ ok: true, sentActivityId: sentActivity.id });
+    // If the scheduled send time has already passed (e.g., the user
+    // approved late), kick off a send pass immediately so the email goes
+    // out without waiting for the next cron tick.
+    let sentNow = false;
+    if (draft.scheduledFor && new Date(draft.scheduledFor) <= new Date()) {
+      const { sendApprovedDraft } = require('../services/sequenceMailer');
+      try {
+        const enrollment = {
+          ...draft.enrollment,
+          sequence: draft.enrollment.sequence,
+          prospect: draft.prospect,
+        };
+        await sendApprovedDraft(enrollment, draft.sequenceStep, { ...draft, subject: finalSubject, draftBody: finalBody });
+        sentNow = true;
+      } catch (err) {
+        console.error('[approve] immediate send failed:', err.message);
+      }
+    }
+
+    res.json({ ok: true, status: sentNow ? 'sent' : 'approved', scheduledFor: draft.scheduledFor });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -221,7 +233,8 @@ router.post('/:id/reject', async (req, res) => {
     });
 
     if (skipStep) {
-      // Advance past this step + resume
+      // Advance past this step and let the next step's pre-draft happen
+      // on the next cron pass.
       const steps = draft.enrollment.sequence.steps;
       const stepOrder = draft.sequenceStep.order;
       const nextStep = steps.find(s => s.order > stepOrder);
@@ -236,8 +249,14 @@ router.post('/:id/reject', async (req, res) => {
           completedAt: nextStep ? null : new Date(),
         },
       });
+    } else {
+      // Pause the enrollment so it doesn't try to send the rejected step.
+      // User must regenerate or skip to continue.
+      await prisma.sequenceEnrollment.update({
+        where: { id: draft.enrollmentId },
+        data: { status: 'paused', pausedAt: new Date(), pausedReason: 'draft_rejected' },
+      });
     }
-    // else: leave enrollment paused — user can manually resume or regenerate
 
     res.json({ ok: true, skipped: skipStep });
   } catch (err) {

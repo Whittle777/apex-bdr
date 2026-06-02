@@ -128,19 +128,22 @@ function interpolate(template, prospect) {
 }
 
 /**
- * If the step has aiPersonalize=true, generate a draft and queue it for HITL review
- * instead of sending. Returns the draft EmailActivity row.
+ * Generate a personalized AI draft and store it as an EmailActivity with
+ * status='draft_pending'. The enrollment is NOT paused — the draft just
+ * sits in the review queue while the rest of the sequence keeps its
+ * scheduled timing. Sending happens later when the user approves AND
+ * nextStepDue has been reached.
  *
- * Side effects:
- *   - Creates an EmailActivity with status='draft_pending'
- *   - Pauses the enrollment (pausedReason='awaiting_review') so cron doesn't loop
- *   - Pushes a reference to the in-memory HITL queue for UI awareness
- *
- * Idempotent: if a draft_pending already exists for this enrollment+step, returns it.
+ * Idempotent: skips if a draft for this enrollment+step already exists in
+ * any of draft_pending / approved / sent.
  */
 async function createPersonalizedDraft(enrollment, step) {
   const existing = await prisma.emailActivity.findFirst({
-    where: { enrollmentId: enrollment.id, sequenceStepId: step.id, status: 'draft_pending' },
+    where: {
+      enrollmentId: enrollment.id,
+      sequenceStepId: step.id,
+      status: { in: ['draft_pending', 'approved', 'sent'] },
+    },
   });
   if (existing) return existing;
 
@@ -173,18 +176,16 @@ async function createPersonalizedDraft(enrollment, step) {
       enrollmentId: enrollment.id,
       status: 'draft_pending',
       subject: draft.subject,
-      scheduledFor: new Date(),
+      // Anchor scheduledFor to when the email should actually go out
+      // (enrollment.nextStepDue). The review queue uses this to sort and
+      // to enforce send timing after approval.
+      scheduledFor: enrollment.nextStepDue || new Date(),
       draftBody: draft.body,
       draftPrompt: draft.prompt,
       draftReasoning: draft.reasoning,
       draftModel: draft.model,
       draftProvider: draft.provider,
     },
-  });
-
-  await prisma.sequenceEnrollment.update({
-    where: { id: enrollment.id },
-    data: { status: 'paused', pausedAt: new Date(), pausedReason: 'awaiting_review', nextStepDue: null },
   });
 
   if (typeof hitlRouter.pushItem === 'function') {
@@ -205,6 +206,145 @@ async function createPersonalizedDraft(enrollment, step) {
 }
 
 /**
+ * Send an already-approved draft. Reuses the same Graph/SMTP send path
+ * as the plain template flow but pulls subject + body off the draft row.
+ * On success, marks the draft EmailActivity as 'sent' (one record per
+ * send — no duplicate sent activity is created) and advances the
+ * enrollment to the next step.
+ */
+async function sendApprovedDraft(enrollment, step, draft) {
+  const prospect = await prisma.prospect.findUnique({
+    where: { id: enrollment.prospectId },
+  });
+  const ownerId = enrollment.sequence?.userId;
+  const subject = draft.subject;
+  const body    = draft.draftBody;
+  const appUrl  = process.env.APP_URL || 'http://localhost:3000';
+  const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
+  const htmlBody = `${body.replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+
+  let externalMessageId = null;
+  try {
+    const { accessToken, fromEmail } = await getMicrosoftAccessToken(ownerId);
+    externalMessageId = await sendViaGraph(accessToken, fromEmail, prospect.email, subject, htmlBody);
+  } catch (msErr) {
+    try {
+      const transporter = await createSmtpTransport(ownerId);
+      const smtpUser = transporter.options?.auth?.user || process.env.SMTP_USER || '';
+      const fromName = process.env.EMAIL_FROM_NAME || smtpUser;
+      const unsubscribeUrl = `${appUrl}/prospects/list-unsubscribe?email=${encodeURIComponent(prospect.email)}`;
+      const info = await transporter.sendMail({
+        from: `"${fromName}" <${smtpUser}>`,
+        to: prospect.email,
+        subject,
+        html: htmlBody,
+        text: body,
+        headers: {
+          'List-Unsubscribe':      `<${unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
+      });
+      externalMessageId = info.messageId || null;
+    } catch (smtpErr) {
+      throw new Error(`Microsoft: ${msErr.message} | SMTP: ${smtpErr.message}`);
+    }
+  }
+
+  // Find the next step so we can advance enrollment.nextStepDue
+  const nextStep = await prisma.sequenceStep.findFirst({
+    where: { sequenceId: enrollment.sequenceId, order: { gt: step.order } },
+    orderBy: { order: 'asc' },
+  });
+  const addDays = (d, n) => new Date(d.getTime() + n * 86400000);
+  const nextStepDue = nextStep ? addDays(new Date(), nextStep.delayDays) : null;
+  const isComplete = !nextStep;
+
+  await Promise.all([
+    prisma.emailActivity.update({
+      where: { id: draft.id },
+      data: { status: 'sent', sentAt: new Date(), externalMessageId, failureReason: null },
+    }),
+    prisma.sequenceEnrollment.update({
+      where: { id: enrollment.id },
+      data: {
+        currentStepOrder: step.order,
+        lastContactedAt: new Date(),
+        nextStepDue,
+        status: isComplete ? 'completed' : 'active',
+        completedAt: isComplete ? new Date() : null,
+      },
+    }),
+    prisma.prospect.update({
+      where: { id: enrollment.prospectId },
+      data: { status: 'In Sequence' },
+    }),
+  ]);
+
+  return { id: draft.id };
+}
+
+/**
+ * Lookahead: walk every active enrollment whose next AI-personalized step
+ * is due within DRAFT_LOOKAHEAD_DAYS, sorted soonest-first, and generate
+ * drafts for any that don't already have one. This is what lets the user
+ * approve emails ahead of their scheduled send time instead of racing the
+ * cron at the last minute.
+ *
+ * Throttled by MAX_DRAFTS_PER_RUN per cron pass to avoid hammering the LLM
+ * provider on big sequences.
+ */
+async function prepareUpcomingDrafts() {
+  const lookaheadDays = parseInt(process.env.DRAFT_LOOKAHEAD_DAYS || '7', 10);
+  const maxPerRun    = parseInt(process.env.MAX_DRAFTS_PER_RUN   || '20', 10);
+  const horizon = new Date(Date.now() + lookaheadDays * 24 * 60 * 60 * 1000);
+
+  const enrollments = await prisma.sequenceEnrollment.findMany({
+    where: {
+      status: 'active',
+      nextStepDue: { not: null, lte: horizon },
+    },
+    include: { sequence: { include: { steps: { orderBy: { order: 'asc' } } } } },
+    orderBy: { nextStepDue: 'asc' }, // sooner sends drafted first
+  });
+
+  const result = { drafted: 0, skipped: 0, failed: 0, errors: [] };
+
+  for (const enrollment of enrollments) {
+    if (result.drafted >= maxPerRun) break;
+
+    const steps = enrollment.sequence.steps;
+    const nextStep = steps.find(s =>
+      enrollment.currentStepOrder === 0 ? s.order === 1 : s.order > enrollment.currentStepOrder
+    );
+    if (!nextStep) { result.skipped += 1; continue; }
+    if (!nextStep.aiPersonalize) { result.skipped += 1; continue; }
+
+    // Skip if any meaningful EmailActivity already exists for this slot
+    const existing = await prisma.emailActivity.findFirst({
+      where: {
+        enrollmentId: enrollment.id,
+        sequenceStepId: nextStep.id,
+        status: { in: ['draft_pending', 'approved', 'sent', 'rejected'] },
+      },
+    });
+    if (existing) { result.skipped += 1; continue; }
+
+    try {
+      await createPersonalizedDraft(enrollment, nextStep);
+      result.drafted += 1;
+    } catch (err) {
+      result.failed += 1;
+      result.errors.push({ enrollmentId: enrollment.id, message: err.message });
+    }
+  }
+
+  if (result.drafted > 0 || result.failed > 0) {
+    console.log(`[Pre-draft] drafted=${result.drafted} skipped=${result.skipped} failed=${result.failed}`);
+  }
+  return result;
+}
+
+/**
  * Send one sequence step email to one prospect.
  * Uses the sequence owner's Microsoft credential via Graph API,
  * falling back to Google SMTP if no Microsoft credential exists.
@@ -213,11 +353,47 @@ async function createPersonalizedDraft(enrollment, step) {
  * If step.aiPersonalize is true, instead of sending, generates a draft for HITL review.
  */
 async function sendStepEmail(enrollment, step) {
-  // AI-personalized steps go through HITL review — generate the draft,
-  // pause the enrollment, and queue for human approval. The cron will
-  // resume the enrollment after approval and the approve endpoint sends.
+  // AI-personalized steps don't get sent until a human-approved draft
+  // exists for them. The lookahead drafter (prepareUpcomingDrafts) should
+  // have already created the draft; here we just decide what to do based
+  // on its current state.
   if (step.aiPersonalize) {
-    return await createPersonalizedDraft(enrollment, step);
+    const draft = await prisma.emailActivity.findFirst({
+      where: {
+        enrollmentId: enrollment.id,
+        sequenceStepId: step.id,
+        status: { in: ['draft_pending', 'approved', 'rejected'] },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (!draft) {
+      // No draft yet — generate one now, but don't send. The user has to
+      // approve before this step can go out.
+      console.log(`[Sequence Mailer] No draft for enrollment ${enrollment.id} step ${step.id} at send time — generating fallback`);
+      return await createPersonalizedDraft(enrollment, step);
+    }
+
+    if (draft.status === 'draft_pending') {
+      // Still waiting on the reviewer. Don't send and don't advance —
+      // the cron will retry next pass.
+      return null;
+    }
+
+    if (draft.status === 'rejected') {
+      // User rejected without skipping; pause the enrollment until they
+      // do something about it (regenerate, skip, or unenroll).
+      await prisma.sequenceEnrollment.update({
+        where: { id: enrollment.id },
+        data: { status: 'paused', pausedAt: new Date(), pausedReason: 'draft_rejected' },
+      });
+      return null;
+    }
+
+    // status === 'approved' — send the human-approved subject/body via
+    // the normal send path, then mark the draft as 'sent' instead of
+    // creating a duplicate EmailActivity.
+    return await sendApprovedDraft(enrollment, step, draft);
   }
 
   const { prospect } = enrollment;
@@ -380,4 +556,11 @@ async function runDueSequenceEmails() {
   return results;
 }
 
-module.exports = { sendStepEmail, runDueSequenceEmails, interpolate, createPersonalizedDraft };
+module.exports = {
+  sendStepEmail,
+  runDueSequenceEmails,
+  interpolate,
+  createPersonalizedDraft,
+  prepareUpcomingDrafts,
+  sendApprovedDraft,
+};
