@@ -371,6 +371,7 @@ const Prospects = () => {
     if (statusFilter !== 'all' && (p.status || 'Uncontacted') !== statusFilter) return false;
     if (quickFilter === 'has_phone' && !(p.phone || p.trackingPixelData?.phone)) return false;
     if (quickFilter === 'enriched' && p.enrichmentStatus !== 'enriched') return false;
+    if (quickFilter === 'has_brief' && !p.researchBrief) return false;
     if (tagFilter && !parseTags(p).includes(tagFilter)) return false;
     if (companyFilter && (p.companyName || '').toLowerCase() !== companyFilter.toLowerCase()) return false;
     if (!searchQuery) return true;
@@ -386,6 +387,7 @@ const Prospects = () => {
       (p.country || '').toLowerCase().includes(q) ||
       (p.techStack || '').toLowerCase().includes(q) ||
       (p.notes || '').toLowerCase().includes(q) ||
+      (p.researchBrief || '').toLowerCase().includes(q) ||
       parseTags(p).some(t => t.toLowerCase().includes(q)) ||
       (qDigits.length >= 4 && phone.includes(qDigits))
     );
@@ -412,6 +414,7 @@ const Prospects = () => {
   const QUICK_FILTERS = [
     { key: 'has_phone', label: 'Has Phone' },
     { key: 'enriched',  label: 'Enriched' },
+    { key: 'has_brief', label: 'Has Brief' },
   ];
 
   const activeFilterCount =
@@ -729,7 +732,22 @@ const Prospects = () => {
                             {initials}
                           </div>
                           <div>
-                            <div style={{ fontWeight: 600, fontSize: '0.875rem' }}>{p.firstName} {p.lastName}</div>
+                            <div style={{ fontWeight: 600, fontSize: '0.875rem', display: 'flex', alignItems: 'center', gap: 6 }}>
+                              <span>{p.firstName} {p.lastName}</span>
+                              {p.researchBrief && (
+                                <span
+                                  title={p.researchBrief.length > 600 ? p.researchBrief.slice(0, 600) + '…' : p.researchBrief}
+                                  style={{
+                                    display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                                    width: 16, height: 16, borderRadius: 4,
+                                    background: 'rgba(56,189,248,0.12)',
+                                    border: '1px solid rgba(56,189,248,0.3)',
+                                    color: '#38bdf8', fontSize: '0.7rem',
+                                    cursor: 'help', flexShrink: 0,
+                                  }}
+                                >🔬</span>
+                              )}
+                            </div>
                             <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: 2 }}>
                               {p.title && <span>{p.title}</span>}
                               {p.title && p.companyName && <span style={{ opacity: 0.5 }}> · </span>}
