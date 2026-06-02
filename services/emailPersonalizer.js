@@ -13,14 +13,21 @@
  */
 const { generate } = require('./aiProvider');
 
-const SYSTEM_PROMPT = `You are an expert B2B sales BDR writing personalized outbound email drafts.
-Write in a natural, conversational, peer-to-peer tone. Be concise — under 130 words by default.
-Lead with insight specific to the prospect's company, not generic openers.
-Never use phrases like "I hope this email finds you well", "quick question", or "circling back".
+const SYSTEM_PROMPT = `You are an expert B2B sales BDR personalizing existing outbound email
+templates. Your job is to adapt a template's opening hook to a specific
+prospect — NOT to rewrite the message from scratch.
+
+Write in a natural, conversational, peer-to-peer tone. Never use phrases
+like "I hope this email finds you well", "quick question", or "circling
+back". Length should match the template — do not summarize or shorten the
+pitch.
+
 Output strict JSON: { "subject": string, "body": string, "reasoning": string }
   - "subject" must be under 60 chars
-  - "body" should be plain text with \\n for line breaks
-  - "reasoning" is 1-2 sentences explaining what context you leveraged`;
+  - "body" should be plain text with \\n for line breaks; preserve any
+    bullet lists from the template using "- " prefixes
+  - "reasoning" is 1-2 sentences explaining what context you leveraged
+    and which parts of the template you kept verbatim`;
 
 function compactList(items) {
   return items.filter(Boolean).join('\n');
@@ -79,16 +86,47 @@ function buildPrompt({ step, prospect, account, customInstructions }) {
   }
   sections.push(
     `=== TASK ===
-Write a personalized email draft for this prospect at this step.
+Your job is to personalize an existing email by adapting the opener so it
+speaks directly to this prospect. You are NOT writing a fresh email; the
+reference body template above is the authoritative pitch that must reach
+the prospect.
 
-Anchor the message in the Prospect Research Brief and Account Research
-sections above — those are authoritative and should not be contradicted.
-Use one concrete detail from them (a specific use case, a recent change,
-a named stakeholder, a warm-intro path) so the email could not have been
-sent to anyone else.
+PRESERVE from the reference body template (verbatim or near-verbatim):
+- Product / solution / brand names (e.g. specific product names like
+  "C3 AI Reliability")
+- Named customers, case studies, or proof points (e.g. "Holcim,
+  ExxonMobil, Shell")
+- Specific benefits, metrics, or value props as listed
+- Bullet lists and their structure
+- The call to action exactly as written
+- Sender sign-off and signature tokens like {{sender.name}}
 
-If neither research section is populated, fall back to the prospect's
-title and company name only — do NOT invent facts.
+PERSONALIZE:
+- The opener: replace the template's first 1-2 sentences with a hook
+  grounded in one concrete detail from the Prospect Research Brief or
+  Account Research (a recent move, a stated priority, a public quote, a
+  named stakeholder, a warm-intro path). This is the only place you get
+  to be creative.
+- One bridge sentence connecting the prospect's situation to the
+  product pitch. Inserts between your personalized opener and the
+  template's product description.
+- The greeting: use the prospect's first name. Replace any {{first_name}}
+  or {{firstName}} token.
+- The subject line: write a fresh subject that's concrete to this
+  prospect but consistent with the pitch and CTA being delivered.
+
+DO NOT:
+- Swap or paraphrase the product being pitched
+- Drop or invent customer name-drops / proof points
+- Invent benefits or metrics not in the template
+- Change or soften the call to action
+- Summarize the pitch to make it shorter
+- Replace the product positioning with something the research suggests
+  might be a "better fit" — that's a strategy decision, not your call
+
+If both research blocks are empty, write a generic opener based on the
+prospect's title + company, keep everything else from the template
+verbatim, and note this in the reasoning field.
 
 Output JSON only.`
   );

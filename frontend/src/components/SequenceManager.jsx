@@ -981,7 +981,7 @@ const SequenceManager = () => {
                                           <input
                                             value={stepForm.aiPurpose}
                                             onChange={e => setStepForm({ ...stepForm, aiPurpose: e.target.value })}
-                                            placeholder="e.g. Cold open. Hook with top use case. Ask for 20-min discovery."
+                                            placeholder="e.g. Cold open for a Mining CFO. Personalize opener around any recent strategic shift or stated priority."
                                             style={{ width: '100%', marginTop: 4 }}
                                           />
                                         </div>
@@ -990,7 +990,7 @@ const SequenceManager = () => {
                                           <textarea
                                             value={stepForm.aiInstructions}
                                             onChange={e => setStepForm({ ...stepForm, aiInstructions: e.target.value })}
-                                            placeholder="e.g. Direct, peer-to-peer tone. Reference Tom Siebel ↔ stakeholder relationships when available. Max 100 words."
+                                            placeholder="Tone, length, and rules. e.g. Direct, peer-to-peer. Match the template's length — do not summarize the pitch. Bridge sentence after opener must mention the prospect's stated priority."
                                             style={{ width: '100%', marginTop: 4, minHeight: 80, resize: 'vertical' }}
                                           />
                                         </div>
@@ -1004,7 +1004,9 @@ const SequenceManager = () => {
                                           />
                                         </div>
                                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
-                                          When the step becomes due, the mailer drafts a personalized subject + body using the prospect's research brief, the account research summary, and the intent / voice guide above — then queues it in the <a href="/hitl" style={{ color: 'var(--accent-secondary)' }}>AI Review Queue</a>. The email is not sent until you approve it; the enrollment stays paused in the meantime. You can edit, regenerate, or skip the step from the review screen.
+                                          The AI <strong>personalizes the opener</strong> against your body template — it does NOT rewrite the pitch. Product names, customer name-drops, benefits, and the CTA from your template are preserved. Only the opening hook (and one bridge sentence) get re-written per prospect.
+                                          <br/>
+                                          Drafts queue in the <a href="/hitl" style={{ color: 'var(--accent-secondary)' }}>AI Review Queue</a> up to 7 days before send time so you can edit, regenerate, or skip before approval.
                                         </div>
                                       </div>
                                     )}
