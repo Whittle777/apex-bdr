@@ -140,7 +140,7 @@ const AccountDetail = ({ account, onSaved, onDeleted, allProspects }) => {
       setActiveTab('details');
       setConfirmDel(false);
     }
-  }, [account?.id]);
+  }, [account?.id, account?.updatedAt]);
 
   if (!account || !form) return (
     <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.9rem' }}>
@@ -567,6 +567,23 @@ const Accounts = () => {
     fetchAccounts();
     api.get('/prospects').then(r => setAllProspects(r.data || [])).catch(() => {});
   }, []);
+
+  // The list endpoint (GET /accounts) only includes _count.prospects,
+  // not the prospects[] array — to keep the list response small. Whenever
+  // the user selects an account, fetch the full detail (with prospects,
+  // owners, and all scalars including researchSummary) and merge it back
+  // into the cached list.
+  useEffect(() => {
+    if (!activeId) return;
+    let cancelled = false;
+    api.get(`/accounts/${activeId}`)
+      .then(r => {
+        if (cancelled) return;
+        setAccounts(prev => prev.map(a => a.id === r.data.id ? r.data : a));
+      })
+      .catch(() => { /* keep showing whatever's in the list cache */ });
+    return () => { cancelled = true; };
+  }, [activeId]);
 
   const handleCreate = async (e) => {
     e.preventDefault();
