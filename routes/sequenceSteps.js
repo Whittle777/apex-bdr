@@ -6,7 +6,10 @@ const prisma = require('../services/database');
 router.use(authenticateToken);
 
 router.post('/', async (req, res) => {
-  const { sequenceId, order, delayDays, subject, body, stepType } = req.body;
+  const {
+    sequenceId, order, delayDays, subject, body, stepType,
+    aiPersonalize, aiPurpose, aiInstructions, aiModel,
+  } = req.body;
   try {
     const step = await prisma.sequenceStep.create({
       data: {
@@ -16,6 +19,10 @@ router.post('/', async (req, res) => {
         delayDays: delayDays ?? 0,
         subject: subject ?? '',
         body: body ?? '',
+        aiPersonalize: !!aiPersonalize,
+        aiPurpose: aiPurpose || null,
+        aiInstructions: aiInstructions || null,
+        aiModel: aiModel || null,
       }
     });
     res.status(201).json(step);
@@ -49,11 +56,21 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { order, delayDays, subject, body, stepType } = req.body;
+  const {
+    order, delayDays, subject, body, stepType,
+    aiPersonalize, aiPurpose, aiInstructions, aiModel,
+  } = req.body;
   try {
     const step = await prisma.sequenceStep.update({
       where: { id: parseInt(id) },
-      data: { order, delayDays, subject, body, ...(stepType && { stepType }) }
+      data: {
+        order, delayDays, subject, body,
+        ...(stepType && { stepType }),
+        ...(aiPersonalize !== undefined  && { aiPersonalize: !!aiPersonalize }),
+        ...(aiPurpose !== undefined      && { aiPurpose: aiPurpose || null }),
+        ...(aiInstructions !== undefined && { aiInstructions: aiInstructions || null }),
+        ...(aiModel !== undefined        && { aiModel: aiModel || null }),
+      }
     });
     res.json(step);
   } catch (error) {
