@@ -40,6 +40,7 @@ function buildAccountSection(account) {
     account.warmIntroPaths && `Warm Intro Paths: ${account.warmIntroPaths}`,
     account.weeklyFocus && `Q1 Focus: ${account.weeklyFocus}`,
     account.description && `Description: ${account.description}`,
+    account.researchSummary && `Account Research (authoritative):\n${account.researchSummary}`,
     account.notes && `Notes: ${account.notes}`,
     account.myNotes && `My Notes: ${account.myNotes}`,
     account.techStack && `Tech Stack: ${account.techStack}`,
@@ -52,6 +53,7 @@ function buildProspectSection(prospect) {
     prospect.title && `Title: ${prospect.title}`,
     prospect.companyName && `Company (denormalized): ${prospect.companyName}`,
     prospect.techStack && `Tech Stack: ${prospect.techStack}`,
+    prospect.researchBrief && `Prospect Research Brief (authoritative):\n${prospect.researchBrief}`,
     prospect.notes && `Notes: ${prospect.notes}`,
   ]);
 }
@@ -76,7 +78,19 @@ function buildPrompt({ step, prospect, account, customInstructions }) {
     sections.push(`=== ADDITIONAL INSTRUCTIONS (override) ===\n${customInstructions}`);
   }
   sections.push(
-    `=== TASK ===\nWrite a personalized email draft for this prospect at this step. Use the account research to ground the message in something specific (a use case, a stakeholder relationship, a warm-intro path). Output JSON only.`
+    `=== TASK ===
+Write a personalized email draft for this prospect at this step.
+
+Anchor the message in the Prospect Research Brief and Account Research
+sections above — those are authoritative and should not be contradicted.
+Use one concrete detail from them (a specific use case, a recent change,
+a named stakeholder, a warm-intro path) so the email could not have been
+sent to anyone else.
+
+If neither research section is populated, fall back to the prospect's
+title and company name only — do NOT invent facts.
+
+Output JSON only.`
   );
   return sections.join('\n\n');
 }

@@ -963,7 +963,7 @@ const SequenceManager = () => {
                                         checked={!!stepForm.aiPersonalize}
                                         onChange={e => setStepForm({ ...stepForm, aiPersonalize: e.target.checked })}
                                       />
-                                      ✨ AI-personalize each email at send time (routes to HITL review)
+                                      ✨ AI-personalize each email using prospect &amp; account research
                                     </label>
                                     {stepForm.aiPersonalize && (
                                       <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -995,7 +995,7 @@ const SequenceManager = () => {
                                           />
                                         </div>
                                         <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
-                                          When enabled, the cron mailer creates a draft instead of sending. Drafts appear in the HITL review queue and at <code>/email-activities/drafts</code> with the prompt visible — you can edit & regenerate before approving.
+                                          When enabled, the mailer rewrites the subject and body at send time using the prospect's research brief, the account research summary, and the step intent / voice guide above. The template below acts as a reference for the AI. Falls back to the plain template if the AI call fails.
                                         </div>
                                       </div>
                                     )}
