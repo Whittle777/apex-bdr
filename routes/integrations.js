@@ -39,6 +39,12 @@ router.post('/', async (req, res) => {
       await axios.get('https://api.elevenlabs.io/v1/user', {
         headers: { 'xi-api-key': clientId },
       });
+    } else if (provider === 'apify') {
+      if (!clientId) return res.status(400).json({ message: 'Apify API token is required.' });
+      // Validate against the Apify user endpoint
+      await axios.get('https://api.apify.com/v2/users/me', {
+        headers: { Authorization: `Bearer ${clientId}` },
+      });
     } else if (provider === 'google') {
       // clientId = email address, clientSecret = App Password (16-char Gmail App Password)
       if (!clientId || !clientSecret) {

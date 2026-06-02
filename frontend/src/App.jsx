@@ -17,6 +17,7 @@ import TaskInbox from './components/TaskInbox';
 import VoiceAgentLanding from './components/VoiceAgentLanding';
 import Accounts from './components/Accounts';
 import EmailSafety from './components/EmailSafety';
+import Research from './components/Research';
 import { ToastProvider } from './components/Toast';
 import { IntegrationProvider, useIntegrations } from './contexts/IntegrationContext';
 import TourOverlay, { useTourAutoStart, TOUR_LS_KEY } from './components/TourOverlay';
@@ -95,6 +96,7 @@ const NAV = [
     label: 'Intelligence',
     links: [
       { path: '/analytics',     label: 'Analytics',  icon: '📊', desc: 'Your pipeline health & activity metrics (G+A)' },
+      { path: '/research',      label: 'Research',   icon: '🔬', desc: 'Upload a prospect list and generate AI research briefs' },
     ],
   },
   {
@@ -147,6 +149,7 @@ const NAV_ACTIONS = [
   { icon:'👥', label:'Prospects',       path:'/prospects',        sub:'Browse, filter & enrich contacts' },
   { icon:'🏢', label:'Accounts',        path:'/accounts',         sub:'Company accounts & linked prospects' },
   { icon:'📊', label:'Analytics',       path:'/analytics',        sub:'Your pipeline health & activity metrics' },
+  { icon:'🔬', label:'Research',        path:'/research',         sub:'Upload a CSV and generate AI research briefs' },
   { icon:'🔗', label:'Integrations',    path:'/integrations',     sub:'CRM, Teams, Gmail config' },
   { icon:'🛡️', label:'Email Safety',   path:'/email-safety',     sub:'Sending limits, bounce rules & compliance' },
   { icon:'✅', label:'Task Inbox',      path:'/tasks',            sub:'All due sequence tasks in one view' },
@@ -644,6 +647,7 @@ function AppInner() {
             <Route path="/integrations"     element={<ProtectedRoute><Integrations /></ProtectedRoute>} />
             <Route path="/hitl"             element={<ProtectedRoute><HITLReviewView /></ProtectedRoute>} />
             <Route path="/analytics"        element={<ProtectedRoute><AnalyticsDashboard /></ProtectedRoute>} />
+            <Route path="/research"         element={<ProtectedRoute><Research /></ProtectedRoute>} />
             <Route path="/deliverability"   element={<ProtectedRoute><DeliverabilityGate /></ProtectedRoute>} />
             <Route path="/voice-fleet"      element={<ProtectedRoute><VoiceFleetCommand /></ProtectedRoute>} />
             <Route path="/tasks"            element={<ProtectedRoute><TaskInbox /></ProtectedRoute>} />

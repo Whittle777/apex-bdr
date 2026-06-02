@@ -313,6 +313,117 @@ const VoiceSection = ({ integrations, onUpdate, toast }) => {
   );
 };
 
+// ─── Apify (LinkedIn scraper) section ───────────────────────────────────────
+const ApifySection = ({ integrations, onUpdate, toast }) => {
+  const [open, setOpen] = useState(false);
+  const [form, setForm] = useState({ clientId: '' });
+  const [connecting, setConnecting] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const apify = integrations.find(i => i.provider === 'apify');
+  const connected = !!apify?.clientId;
+
+  const handleConnect = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    try {
+      await api.post('/integrations', { provider: 'apify', clientId: form.clientId, clientSecret: '', refreshToken: '', email: '' });
+      await onUpdate();
+      setConnecting(false);
+      toast('Apify connected', 'success');
+    } catch (err) {
+      setError(err.response?.data?.message || 'Invalid Apify token');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      await api.delete('/integrations/apify');
+      await onUpdate();
+      toast('Apify disconnected', 'warning');
+    } catch {
+      toast('Disconnect failed', 'error');
+    }
+  };
+
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+          background: 'none', border: 'none', cursor: 'pointer', padding: '0 0 12px',
+          color: 'var(--text-muted)',
+        }}
+      >
+        <span style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Research</span>
+        <span style={{ fontSize: '0.7rem', display: 'inline-block', transform: open ? 'rotate(90deg)' : 'rotate(0)' }}>▶</span>
+        {connected && <span style={{ fontSize: '0.62rem', padding: '1px 7px', background: 'var(--status-success-dim)', color: 'var(--status-success)', border: '1px solid var(--status-success-border)', borderRadius: 'var(--radius-full)', fontWeight: 700, marginLeft: 4 }}>Connected</span>}
+      </button>
+
+      {open && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(380px, 1fr))', gap: 16 }}>
+          <div style={{
+            background: 'var(--bg-elevated)',
+            border: `1px solid ${connected ? 'rgba(56,189,248,0.3)' : 'var(--border-color)'}`,
+            borderTop: `3px solid ${connected ? '#38bdf8' : 'var(--border-color)'}`,
+            borderRadius: 'var(--radius-lg)', padding: 20,
+            display: 'flex', flexDirection: 'column', gap: 14,
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ width: 42, height: 42, borderRadius: 10, background: 'rgba(56,189,248,0.1)', border: '1px solid rgba(56,189,248,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.2rem', flexShrink: 0 }}>
+                  🔬
+                </div>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Apify (LinkedIn scraper)</h3>
+                  <p style={{ margin: 0, fontSize: '0.78rem', marginTop: 2, color: 'var(--text-secondary)' }}>
+                    Powers LinkedIn profile lookups in the Research tab. ~$10 per 1000 profiles.
+                  </p>
+                </div>
+              </div>
+              {connected && !connecting && (
+                <span style={{ padding: '4px 10px', flexShrink: 0, background: 'rgba(56,189,248,0.1)', color: '#38bdf8', border: '1px solid rgba(56,189,248,0.25)', borderRadius: 'var(--radius-full)', fontSize: '0.7rem', fontWeight: 700 }}>
+                  ● Active
+                </span>
+              )}
+            </div>
+
+            {connecting ? (
+              <form onSubmit={handleConnect} style={{ display: 'flex', flexDirection: 'column', gap: 10, borderTop: '1px solid var(--border-color)', paddingTop: 14 }}>
+                <FIELD label="API Token">
+                  <input type="password" required style={{ width: '100%' }} value={form.clientId} onChange={e => setForm({ clientId: e.target.value })} placeholder="apify_api_…" />
+                </FIELD>
+                <p style={{ margin: 0, fontSize: '0.75rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+                  Get yours at <a href="https://console.apify.com/settings/integrations" target="_blank" rel="noreferrer" style={{ color: 'var(--accent-secondary)' }}>console.apify.com/settings/integrations</a>.
+                </p>
+                {error && <div style={{ padding: '8px 12px', background: 'var(--status-danger-dim)', border: '1px solid var(--status-danger-border)', borderRadius: 'var(--radius-sm)', color: 'var(--status-danger)', fontSize: '0.82rem' }}>{error}</div>}
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="submit" disabled={loading} style={{ flex: 1, padding: '9px', background: 'linear-gradient(135deg, #0ea5e9, #38bdf8)' }}>{loading ? 'Verifying…' : 'Connect'}</button>
+                  <button type="button" className="secondary" onClick={() => setConnecting(false)} style={{ padding: '9px 14px' }}>Cancel</button>
+                </div>
+              </form>
+            ) : (
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className="secondary" style={{ flex: 1, padding: '9px', borderStyle: connected ? 'solid' : 'dashed' }} onClick={() => { setConnecting(true); setForm({ clientId: '' }); }}>
+                  {connected ? '⚙ Reconfigure' : '+ Connect Apify'}
+                </button>
+                {connected && (
+                  <button className="danger" style={{ padding: '9px 14px' }} onClick={handleDisconnect}>Disconnect</button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 const Integrations = () => {
   const [integrations, setIntegrations] = useState([]);
   const [isConnecting, setIsConnecting] = useState(null);
@@ -791,6 +902,9 @@ const Integrations = () => {
 
       {/* Voice — collapsed section */}
       <VoiceSection integrations={integrations} onUpdate={fetchIntegrations} toast={toast} />
+
+      {/* Research / LinkedIn enrichment — Apify */}
+      <ApifySection integrations={integrations} onUpdate={fetchIntegrations} toast={toast} />
 
       {/* Help notes */}
       <div style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>

@@ -301,6 +301,61 @@ router.delete('/:id/link-prospect/:prospectId', async (req, res) => {
   }
 });
 
+// POST /accounts/backfill — create Account rows for every distinct companyName
+// on existing Prospects that doesn't already have a matching Account, then
+// link prospects to those accounts. Idempotent — safe to re-run.
+router.post('/backfill', async (req, res) => {
+  try {
+    const distinctCompanies = await prisma.prospect.findMany({
+      where: { companyName: { not: null } },
+      select: { companyName: true, country: true, region: true, techStack: true },
+    });
+
+    const seen = new Set();
+    const samples = [];
+    for (const p of distinctCompanies) {
+      if (p.companyName && !seen.has(p.companyName)) {
+        seen.add(p.companyName);
+        samples.push(p);
+      }
+    }
+
+    let accountsCreated = 0;
+    let prospectsLinked = 0;
+
+    for (const sample of samples) {
+      let account = await prisma.account.findFirst({ where: { name: sample.companyName } });
+      if (!account) {
+        account = await prisma.account.create({
+          data: {
+            name:      sample.companyName,
+            country:   sample.country   || null,
+            region:    sample.region    || null,
+            techStack: sample.techStack || null,
+            owners:    { connect: [{ id: req.userId }] },
+          },
+        });
+        accountsCreated += 1;
+      } else if (req.userId) {
+        await prisma.account.update({
+          where: { id: account.id },
+          data: { owners: { connect: [{ id: req.userId }] } },
+        }).catch(() => { /* already owned */ });
+      }
+      const linkResult = await prisma.prospect.updateMany({
+        where: { companyName: sample.companyName, accountId: null },
+        data: { accountId: account.id },
+      });
+      prospectsLinked += linkResult.count;
+    }
+
+    res.json({ accountsCreated, prospectsLinked });
+  } catch (err) {
+    console.error('[accounts/backfill]', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // POST /accounts/auto-link — auto-link prospects to accounts by matching companyName
 router.post('/auto-link', async (req, res) => {
   try {

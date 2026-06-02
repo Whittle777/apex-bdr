@@ -78,6 +78,7 @@ model Prospect {
   enrichmentStatus    String               @default("pending")
   status              String               @default("Uncontacted")
   notes               String?
+  researchBrief       String?
   country             String?
   region              String?
   techStack           String?

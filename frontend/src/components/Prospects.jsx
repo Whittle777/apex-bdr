@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useLocation } from 'react-router-dom';
 import api from '../services/api';
-import Papa from 'papaparse';
+import { parseZoomInfoCsv } from '../utils/zoomInfoCsv';
 import ProspectDetailDrawer from './ProspectDetailDrawer';
 import { useToast } from './Toast';
 import { PROSPECT_STATUS_STYLES } from '../constants';
@@ -311,94 +311,38 @@ const Prospects = () => {
     setEditingStatusId(null);
   };
 
-  const handleFileUpload = (e) => {
+  const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
     setFileProcessing(true);
     setUploadStats(null);
 
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      transformHeader: h => h.trim(),
-      complete: async (results) => {
-        const mappedProspects = results.data.map(row => {
-          const firstName = row['First Name'] || row['firstName'] || row['First'] || '';
-          const lastName  = row['Last Name']  || row['lastName']  || row['Last']  || '';
-          const email     = row['Email Address'] || row['Work Email'] || row['Email'] || row['email'] || '';
-          const title     = row['Job Title'] || row['Title'] || row['jobTitle'] || row['Person Title'] || '';
-          const phone     = row['Direct Phone Number'] || row['Phone Number (Direct)'] || row['Direct Phone']
-                          || row['Mobile phone'] || row['Mobile Phone'] || row['Phone'] || row['phone'] || '';
-          const companyName = row['Company Name'] || row['Company'] || row['companyName'] || row['Account Name'] || '';
-          const country   = row['Country'] || row['Company Country'] || '';
-          const region    = row['Person State'] || row['State'] || row['Person City'] || row['Region'] || '';
-          const linkedIn  = row['LinkedIn Contact Profile URL'] || row['LinkedIn URL']
-                          || row['LinkedIn Profile URL'] || row['Person LinkedIn URL'] || '';
-          const industry  = row['Primary Industry'] || row['Primary Sub-Industry'] || '';
-          const department = row['Department'] || '';
-
-          // Store rich account context as JSON so it's available for enrichment / display
-          const extra = {};
-          if (linkedIn)                                          extra.linkedIn = linkedIn;
-          if (row['Website'])                                    extra.website = row['Website'];
-          if (industry)                                          extra.industry = industry;
-          if (row['Revenue Range (in USD)'])                     extra.revenue = row['Revenue Range (in USD)'];
-          if (row['Employee Range'])                             extra.employees = row['Employee Range'];
-          if (row['Management Level'])                           extra.managementLevel = row['Management Level'];
-          const companyLoc = [row['Company City'], row['Company State'], row['Company Country']]
-            .filter(Boolean).join(', ');
-          if (companyLoc)                                        extra.companyLocation = companyLoc;
-          if (row['ZoomInfo Company Profile URL'])               extra.zoomInfoCompanyUrl = row['ZoomInfo Company Profile URL'];
-
-          return {
-            firstName,
-            lastName,
-            email,
-            companyName,
-            title,
-            phone,
-            country,
-            region,
-            techStack: industry || department,
-            notes: linkedIn ? `LinkedIn: ${linkedIn}` : '',
-            trackingPixelData: Object.keys(extra).length ? JSON.stringify(extra) : undefined,
-            enrichmentStatus: 'pending',
-            status: 'Uncontacted',
-          };
-        }).filter(p => p.email);
-
-        if (mappedProspects.length === 0) {
-          setUploadStats({ error: 'No valid prospects found. Check CSV column headers.' });
-          setFileProcessing(false);
-          return;
-        }
-
-        try {
-          const res = await api.post('/prospects/bulk', { prospects: mappedProspects });
-          const added = res.data?.count ?? mappedProspects.length;
-          const accountsCreated = res.data?.accountsCreated ?? 0;
-          const skipped = mappedProspects.length - added;
-          const parts = [];
-          if (added > 0) parts.push(`${added} prospect${added !== 1 ? 's' : ''} imported`);
-          if (skipped > 0) parts.push(`${skipped} skipped (already exist)`);
-          if (accountsCreated > 0) parts.push(`${accountsCreated} account${accountsCreated !== 1 ? 's' : ''} created`);
-          const msg = parts.join(' · ');
-          setUploadStats({ success: msg });
-          fetchProspects();
-          toast(msg, 'success');
-        } catch (err) {
-          setUploadStats({ error: err.response?.data?.message || err.message });
-          toast('Import failed — check CSV format', 'error');
-        } finally {
-          setFileProcessing(false);
-          if (fileInputRef.current) fileInputRef.current.value = '';
-        }
-      },
-      error: () => {
-        setUploadStats({ error: 'Failed to parse CSV file.' });
+    try {
+      const mappedProspects = await parseZoomInfoCsv(file);
+      if (mappedProspects.length === 0) {
+        setUploadStats({ error: 'No valid prospects found. Check CSV column headers.' });
         setFileProcessing(false);
-      },
-    });
+        return;
+      }
+      const res = await api.post('/prospects/bulk', { prospects: mappedProspects });
+      const added = res.data?.count ?? mappedProspects.length;
+      const accountsCreated = res.data?.accountsCreated ?? 0;
+      const skipped = mappedProspects.length - added;
+      const parts = [];
+      if (added > 0) parts.push(`${added} prospect${added !== 1 ? 's' : ''} imported`);
+      if (skipped > 0) parts.push(`${skipped} skipped (already exist)`);
+      if (accountsCreated > 0) parts.push(`${accountsCreated} account${accountsCreated !== 1 ? 's' : ''} created`);
+      const msg = parts.join(' · ');
+      setUploadStats({ success: msg });
+      fetchProspects();
+      toast(msg, 'success');
+    } catch (err) {
+      setUploadStats({ error: err.response?.data?.message || err.message || 'Failed to parse CSV file.' });
+      toast('Import failed — check CSV format', 'error');
+    } finally {
+      setFileProcessing(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
   const handleClearDemoData = async () => {

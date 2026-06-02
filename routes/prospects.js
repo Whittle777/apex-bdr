@@ -97,53 +97,12 @@ router.post('/bulk', async (req, res) => {
     if (!prospects || !Array.isArray(prospects)) {
       return res.status(400).json({ message: 'Invalid prospects array' });
     }
-
-    // Upsert one Account per unique companyName in the batch
-    const uniqueCompanies = [...new Set(prospects.map(p => p.companyName).filter(Boolean))];
-    const accountMap = {}; // companyName -> accountId
-
-    for (const name of uniqueCompanies) {
-      const existing = await prisma.account.findFirst({ where: { name } });
-      if (existing) {
-        accountMap[name] = existing.id;
-      } else {
-        const sample = prospects.find(p => p.companyName === name);
-        const created = await prisma.account.create({
-          data: {
-            name,
-            country:   sample?.country   || null,
-            region:    sample?.region    || null,
-            techStack: sample?.techStack || null,
-          },
-        });
-        accountMap[name] = created.id;
-      }
-    }
-
-    const prospectsWithOwner = prospects.map(p => ({
-      ...p,
-      ownedById: req.userId,
-      accountId: p.companyName ? accountMap[p.companyName] : undefined,
-    }));
-
-    const result = await createProspectsBulk(prospectsWithOwner);
-
-    // Add uploader as owner of all newly created prospects
-    if (req.userId && result.count > 0) {
-      const newProspects = await prisma.prospect.findMany({
-        where: { email: { in: prospectsWithOwner.map(p => p.email) }, ownedById: req.userId },
-        select: { id: true },
-      });
-      await Promise.all(newProspects.map(p =>
-        prisma.prospectOwner.upsert({
-          where: { prospectId_userId: { prospectId: p.id, userId: req.userId } },
-          update: {},
-          create: { prospectId: p.id, userId: req.userId },
-        })
-      ));
-    }
-
-    res.status(201).json({ ...result, accountsCreated: Object.keys(accountMap).length });
+    const { upsertProspectBatch } = require('../services/prospectBulk');
+    const result = await upsertProspectBatch({ prospects, userId: req.userId });
+    res.status(201).json({
+      count: result.count,
+      accountsCreated: result.accountsCreated,
+    });
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
