@@ -311,16 +311,42 @@ router.post('/load', async (req, res) => {
 });
 
 // ─── DELETE /demo/clear ─────────────────────────────────────────────────────
+// Wipes all user-created CRM data — keeps User and IntegrationCredential
+// (auth) so the operator stays logged in and connected to providers.
 router.delete('/clear', async (req, res) => {
   try {
-    await prisma.emailActivity.deleteMany({});
-    await prisma.callActivity.deleteMany({});
-    await prisma.sequenceEnrollment.deleteMany({});
-    await prisma.sequenceStep.deleteMany({});
-    await prisma.sequence.deleteMany({});
-    const { count } = await prisma.prospect.deleteMany({});
-    res.json({ ok: true, cleared: count });
+    // Children first to respect FKs (most have onDelete: Cascade, but being
+    // explicit is safer and the counts are useful for the response).
+    const emails    = await prisma.emailActivity.deleteMany({});
+    const calls     = await prisma.callActivity.deleteMany({});
+    const replies   = await prisma.replyActivity.deleteMany({});
+    const meetings  = await prisma.meetingActivity.deleteMany({});
+    const vms       = await prisma.vmRecording.deleteMany({}).catch(() => ({ count: 0 }));
+    const owners    = await prisma.prospectOwner.deleteMany({});
+    const enrolls   = await prisma.sequenceEnrollment.deleteMany({});
+    const steps     = await prisma.sequenceStep.deleteMany({});
+    const sequences = await prisma.sequence.deleteMany({});
+    const prospects = await prisma.prospect.deleteMany({});
+    const accounts  = await prisma.account.deleteMany({});
+
+    res.json({
+      ok: true,
+      cleared: {
+        emailActivities:     emails.count,
+        callActivities:      calls.count,
+        replyActivities:     replies.count,
+        meetingActivities:   meetings.count,
+        vmRecordings:        vms.count,
+        prospectOwners:      owners.count,
+        sequenceEnrollments: enrolls.count,
+        sequenceSteps:       steps.count,
+        sequences:           sequences.count,
+        prospects:           prospects.count,
+        accounts:            accounts.count,
+      },
+    });
   } catch (err) {
+    console.error('[demo/clear]', err);
     res.status(500).json({ message: err.message });
   }
 });
