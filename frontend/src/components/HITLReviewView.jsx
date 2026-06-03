@@ -43,7 +43,9 @@ const normaliseItem = (item) => ({
   sourceData: item.sourceData || { recentEmail: '—', calls: 0, webVisits: 0, techStack: '—' },
 });
 
-// Normalise an EmailActivity draft row (durable Track B drafts) into the same UI shape
+// Normalise an EmailActivity draft row (durable Track B drafts) into the same UI shape.
+// Prefer the server-rendered preview (with {{sender.*}} / {{firstName}}/etc.
+// already resolved) so the reviewer sees the actual outgoing email.
 const normaliseDraft = (d) => ({
   id: `draft-${d.id}`,             // string-prefixed so it doesn't collide with queue ints
   emailActivityId: d.id,
@@ -53,14 +55,14 @@ const normaliseDraft = (d) => ({
   urgency: 'Medium',
   status: 'pending',
   createdAt: d.createdAt,
-  subject: d.subject,
-  draftBody: d.draftBody || '',
+  subject:   d.previewSubject || d.subject,
+  draftBody: d.previewBody    || d.draftBody || '',
   draftPrompt: d.draftPrompt || '',
   draftReasoning: d.draftReasoning || '',
   draftModel: d.draftModel || '',
   draftProvider: d.draftProvider || '',
   aiSummary: d.draftReasoning || `Personalized via ${d.draftProvider || '?'} ${d.draftModel || ''}`.trim(),
-  draftContent: `Subject: ${d.subject}\n\n${d.draftBody || ''}`,
+  draftContent: `Subject: ${d.previewSubject || d.subject}\n\n${d.previewBody || d.draftBody || ''}`,
   prospect: d.prospect ? {
     ...d.prospect,
     company: d.prospect.companyName,
@@ -198,13 +200,17 @@ const HITLReviewView = () => {
         customInstructions: regenInput || undefined,
       });
       const fresh = res.data;
-      // Update the queue item in place
+      // Use the server-rendered preview when available so {{sender.*}}
+      // tokens are resolved; fall back to the raw fields for older
+      // backends.
+      const displaySubject = fresh.previewSubject || fresh.subject;
+      const displayBody    = fresh.previewBody    || fresh.draftBody;
       setQueue(prev => prev.map(it => it.id === selectedId
-        ? { ...it, subject: fresh.subject, draftBody: fresh.draftBody, draftPrompt: fresh.draftPrompt, draftReasoning: fresh.draftReasoning, draftModel: fresh.draftModel, draftProvider: fresh.draftProvider }
+        ? { ...it, subject: displaySubject, draftBody: displayBody, draftPrompt: fresh.draftPrompt, draftReasoning: fresh.draftReasoning, draftModel: fresh.draftModel, draftProvider: fresh.draftProvider }
         : it
       ));
-      setEditedSubject(fresh.subject);
-      setEditedContent(fresh.draftBody);
+      setEditedSubject(displaySubject);
+      setEditedContent(displayBody);
       setRegenInput('');
       toast('Regenerated', 'success', 2000);
     } catch (err) {

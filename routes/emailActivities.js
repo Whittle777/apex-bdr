@@ -233,11 +233,33 @@ router.get('/drafts', async (req, res) => {
       include: {
         prospect: { select: { id: true, firstName: true, lastName: true, email: true, companyName: true, title: true } },
         sequenceStep: { select: { id: true, order: true, subject: true, aiPurpose: true, aiInstructions: true, aiModel: true } },
-        enrollment: { select: { id: true, sequenceId: true, status: true, pausedReason: true } },
+        // Pull the sequence owner so we can interpolate {{sender.*}}
+        // tokens for the preview.
+        enrollment: {
+          select: {
+            id: true, sequenceId: true, status: true, pausedReason: true,
+            sequence: { select: { user: { select: { id: true, name: true, email: true } } } },
+          },
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
-    res.json(drafts);
+
+    // Render a "what the prospect will actually see" preview for each
+    // draft by interpolating prospect + sender tokens. Keeps the raw
+    // tokenised subject/draftBody on the response too — the UI can show
+    // the preview by default and reveal the raw template on edit.
+    const { interpolate } = require('../services/sequenceMailer');
+    const enriched = drafts.map(d => {
+      const sender = d.enrollment?.sequence?.user || null;
+      return {
+        ...d,
+        previewSubject: interpolate(d.subject || '',   d.prospect || {}, sender),
+        previewBody:    interpolate(d.draftBody || '', d.prospect || {}, sender),
+        sender,
+      };
+    });
+    res.json(enriched);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -380,12 +402,17 @@ router.post('/:id/regenerate', async (req, res) => {
   try {
     const draft = await prisma.emailActivity.findUnique({
       where: { id },
-      include: { sequenceStep: true, prospect: { include: { account: true } } },
+      include: {
+        sequenceStep: true,
+        prospect: { include: { account: true } },
+        enrollment: { include: { sequence: { include: { user: { select: { id: true, name: true, email: true } } } } } },
+      },
     });
     if (!draft) return res.status(404).json({ message: 'Draft not found' });
     if (draft.status !== 'draft_pending') return res.status(400).json({ message: `Draft status is "${draft.status}", expected "draft_pending"` });
 
     const { personalize } = require('../services/emailPersonalizer');
+    const { interpolate } = require('../services/sequenceMailer');
     const fresh = await personalize({
       step: draft.sequenceStep,
       prospect: draft.prospect,
@@ -404,7 +431,16 @@ router.post('/:id/regenerate', async (req, res) => {
         draftProvider: fresh.provider,
       },
     });
-    res.json(updated);
+
+    // Return the resolved preview so the UI can refresh without a full
+    // refetch — interpolate using the same sender + prospect the
+    // /drafts endpoint uses.
+    const sender = draft.enrollment?.sequence?.user || null;
+    res.json({
+      ...updated,
+      previewSubject: interpolate(updated.subject || '',   draft.prospect, sender),
+      previewBody:    interpolate(updated.draftBody || '', draft.prospect, sender),
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
