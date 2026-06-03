@@ -238,7 +238,7 @@ router.get('/drafts', async (req, res) => {
         enrollment: {
           select: {
             id: true, sequenceId: true, status: true, pausedReason: true,
-            sequence: { select: { user: { select: { id: true, name: true, email: true } } } },
+            sequence: { select: { name: true, user: { select: { id: true, name: true, email: true } } } },
           },
         },
       },

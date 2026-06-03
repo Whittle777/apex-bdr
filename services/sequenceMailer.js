@@ -386,19 +386,10 @@ async function createPersonalizedDraft(enrollment, step) {
     },
   });
 
-  if (typeof hitlRouter.pushItem === 'function') {
-    try {
-      hitlRouter.pushItem({
-        type: 'Email Draft',
-        confidenceScore: 75,
-        urgency: 'Medium',
-        prospectId: enrollment.prospectId,
-        emailActivityId: draftRow.id,
-        draftContent: `Subject: ${draft.subject}\n\n${draft.body}`,
-        aiSummary: draft.reasoning || `Personalized via ${draft.provider} ${draft.model}.`,
-      });
-    } catch { /* non-critical */ }
-  }
+  // No longer push to the legacy in-memory HITL queue — the durable
+  // EmailActivity row above is the source of truth for the Review
+  // Queue UI. Pushing here caused duplicates ("Queue Item #N" entries
+  // shadowing every real draft).
 
   return draftRow;
 }

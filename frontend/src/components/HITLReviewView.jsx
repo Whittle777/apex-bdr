@@ -56,6 +56,7 @@ const normaliseDraft = (d) => ({
   urgency: 'Medium',
   status: 'pending',
   createdAt: d.createdAt,
+  scheduledFor: d.scheduledFor,
   subject:   d.previewSubject || d.subject,
   draftBody: d.previewBody    || d.draftBody || '',
   draftPrompt: d.draftPrompt || '',
@@ -70,6 +71,9 @@ const normaliseDraft = (d) => ({
   } : { firstName: 'Prospect', lastName: `#${d.prospectId}`, companyName: '—', email: '—', title: '—' },
   step: d.sequenceStep,
   enrollment: d.enrollment,
+  // Sequence + step context shown on the sidebar row + record header
+  sequenceName: d.enrollment?.sequence?.name || null,
+  stepOrder:    d.sequenceStep?.order || null,
   reasoning: [
     d.draftReasoning || `Generated via ${d.draftProvider} ${d.draftModel}`,
     d.sequenceStep?.aiPurpose ? `Intent: ${d.sequenceStep.aiPurpose}` : null,
@@ -98,8 +102,16 @@ const HITLReviewView = () => {
         api.get('/hitl/queue'),
         api.get('/email-activities/drafts'),
       ]);
-      const hitlItems = hitlRes.status === 'fulfilled' ? (hitlRes.value.data || []).map(normaliseItem) : [];
+      const hitlItemsRaw = hitlRes.status === 'fulfilled' ? (hitlRes.value.data || []) : [];
       const draftItems = draftsRes.status === 'fulfilled' ? (draftsRes.value.data || []).map(normaliseDraft) : [];
+      // Defensive dedupe: filter out any legacy in-memory queue items
+      // that point at the same EmailActivity as a real draft we already
+      // have (these used to be pushed as duplicates). Anything left is
+      // a real legacy item with no DB counterpart.
+      const draftActivityIds = new Set(draftItems.map(d => d.emailActivityId).filter(Boolean));
+      const hitlItems = hitlItemsRaw
+        .filter(it => !it.emailActivityId || !draftActivityIds.has(it.emailActivityId))
+        .map(normaliseItem);
       // Drafts first (most actionable), then legacy queue items
       const items = [...draftItems, ...hitlItems];
       setQueue(items);
@@ -343,16 +355,17 @@ const HITLReviewView = () => {
                       boxShadow: item.urgency === 'High' ? '0 0 6px var(--status-danger)' : 'none',
                     }}
                   />
-                  <div>
-                    <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>{item.prospect.firstName} {item.prospect.lastName}</div>
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{item.prospect.companyName || item.prospect.company} · {item.type}</div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontWeight: 600, fontSize: '0.9rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.prospect.firstName} {item.prospect.lastName}</div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{item.prospect.companyName || item.prospect.company || item.type}</div>
+                    {item.sequenceName && (
+                      <div style={{ fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {item.sequenceName}{item.stepOrder ? ` · Step ${item.stepOrder}` : ''}
+                      </div>
+                    )}
                   </div>
                 </div>
-                <div style={{ textAlign: 'right', flexShrink: 0 }}>
-                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{item.pipelineValue}</div>
-                </div>
               </div>
-              <ConfidenceBadge score={item.confidenceScore} />
             </div>
           ))}
         </div>
@@ -407,6 +420,12 @@ const HITLReviewView = () => {
                   {[selected.prospect.title, selected.prospect.companyName || selected.prospect.company, selected.prospect.email]
                     .filter(v => v && v !== '—').join(' · ')}
                 </div>
+                {selected.sequenceName && (
+                  <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 3 }}>
+                    Sequence: <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{selected.sequenceName}</span>
+                    {selected.stepOrder && <> · <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>Step {selected.stepOrder}</span></>}
+                  </div>
+                )}
               </div>
               {selected.scheduledFor && (
                 <div style={{ textAlign: 'right', fontSize: '0.74rem', flexShrink: 0 }}>
