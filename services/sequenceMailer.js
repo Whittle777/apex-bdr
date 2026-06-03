@@ -595,7 +595,17 @@ async function sendDueApprovedDrafts() {
   });
 
   for (const draft of drafts) {
-    if (!draft.enrollment || !draft.sequenceStep) continue;
+    if (!draft.enrollment || !draft.sequenceStep) {
+      // Record the broken relation so the user can see why it's stuck.
+      result.failed += 1;
+      const reason = `Draft is missing its ${!draft.enrollment ? 'enrollment' : 'step'} link`;
+      result.errors.push({ draftId: draft.id, message: reason });
+      await prisma.emailActivity.update({
+        where: { id: draft.id },
+        data: { failureReason: reason },
+      }).catch(() => {});
+      continue;
+    }
     try {
       const enrollment = {
         ...draft.enrollment,
@@ -607,10 +617,15 @@ async function sendDueApprovedDrafts() {
     } catch (err) {
       result.failed += 1;
       result.errors.push({ draftId: draft.id, message: err.message });
-      // Don't flip the draft's status — leave it as 'approved' so the
-      // next cron pass retries. If it fails persistently we surface that
-      // in the logs.
       console.error(`[Approved Send] draft ${draft.id} failed: ${err.message}`);
+      // Persist the error so the user can see WHY a "approved" item
+      // isn't sending. Status stays 'approved' so cron keeps retrying;
+      // failureReason is overwritten each time so the latest attempt
+      // wins.
+      await prisma.emailActivity.update({
+        where: { id: draft.id },
+        data: { failureReason: err.message },
+      }).catch(() => {});
     }
   }
 

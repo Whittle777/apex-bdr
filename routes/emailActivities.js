@@ -38,7 +38,20 @@ router.get('/sequence/:sequenceId', async (req, res) => {
       },
     });
 
-    // Build scheduled items — find the next step for each enrollment
+    // Build scheduled items — find the next step for each enrollment.
+    // Suppress the placeholder when an EmailActivity already covers the
+    // same slot (a draft awaiting approval, an approved draft that will
+    // send shortly, or a sent record). The activity row is the
+    // source-of-truth for that step; the placeholder would be a
+    // confusing duplicate.
+    const COVERED_STATUSES = new Set(['draft_pending', 'approved', 'sent']);
+    const activityCovers = (enrollmentId, stepId) =>
+      activities.some(a =>
+        a.enrollmentId === enrollmentId &&
+        a.sequenceStepId === stepId &&
+        COVERED_STATUSES.has(a.status)
+      );
+
     const scheduledItems = scheduled.map(enr => {
       const nextStep = enr.sequence.steps.find(s =>
         enr.currentStepOrder === 0 ? s.order === 1 : s.order > enr.currentStepOrder
@@ -52,6 +65,9 @@ router.get('/sequence/:sequenceId', async (req, res) => {
         scheduledFor: enr.nextStepDue,
         status: 'scheduled',
       };
+    }).filter(item => {
+      if (!item.sequenceStep) return false;
+      return !activityCovers(item.enrollmentId, item.sequenceStep.id);
     });
 
     const activityItems = activities.map(a => ({ type: 'activity', ...a }));
