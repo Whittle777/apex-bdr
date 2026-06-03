@@ -64,24 +64,39 @@ async function getMicrosoftAccessToken(userId) {
  */
 async function sendViaGraph(accessToken, fromEmail, toEmail, subject, htmlBody) {
   const messageId = `<${crypto.randomUUID()}@apex-bdr>`;
-  await axios.post(
-    'https://graph.microsoft.com/v1.0/me/sendMail',
-    {
-      message: {
-        subject,
-        body: { contentType: 'HTML', content: htmlBody },
-        toRecipients: [{ emailAddress: { address: toEmail } }],
-        internetMessageHeaders: [
-          { name: 'Message-ID',              value: messageId },
-          { name: 'List-Unsubscribe',        value: `<${process.env.APP_URL || 'http://localhost:3000'}/prospects/list-unsubscribe?email=${encodeURIComponent(toEmail)}>` },
-          { name: 'List-Unsubscribe-Post',   value: 'List-Unsubscribe=One-Click' },
-        ],
+  try {
+    await axios.post(
+      'https://graph.microsoft.com/v1.0/me/sendMail',
+      {
+        message: {
+          subject,
+          body: { contentType: 'HTML', content: htmlBody },
+          toRecipients: [{ emailAddress: { address: toEmail } }],
+          internetMessageHeaders: [
+            { name: 'Message-ID',              value: messageId },
+            { name: 'List-Unsubscribe',        value: `<${process.env.APP_URL || 'http://localhost:3000'}/prospects/list-unsubscribe?email=${encodeURIComponent(toEmail)}>` },
+            { name: 'List-Unsubscribe-Post',   value: 'List-Unsubscribe=One-Click' },
+          ],
+        },
+        saveToSentItems: true,
       },
-      saveToSentItems: true,
-    },
-    { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
-  );
-  return messageId;
+      { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
+    );
+    return messageId;
+  } catch (err) {
+    // axios swallows the actual Graph error detail into err.response.data.
+    // Surface it on the thrown message so it shows up in the UI's
+    // failureReason field instead of just "Request failed with status code X".
+    const status = err.response?.status;
+    const graphErr = err.response?.data?.error;
+    const detail = graphErr?.message || graphErr?.code || JSON.stringify(err.response?.data || {}).slice(0, 200);
+    const enriched = new Error(
+      `Graph /me/sendMail returned ${status || '?'}: ${detail || err.message}`
+    );
+    enriched.status = status;
+    enriched.graphError = graphErr;
+    throw enriched;
+  }
 }
 
 /**
