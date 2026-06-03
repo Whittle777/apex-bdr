@@ -100,6 +100,8 @@ PRESERVE from the reference body template (verbatim or near-verbatim):
 - Bullet lists and their structure
 - The call to action exactly as written
 - Sender sign-off and signature tokens like {{sender.name}}
+  (any {{...}} token in the template is a merge field resolved at send
+  time — keep them exactly as-is, do not replace with invented names)
 
 PERSONALIZE:
 - The opener: replace the template's first 1-2 sentences with a hook

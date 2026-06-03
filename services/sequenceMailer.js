@@ -156,13 +156,37 @@ async function createSmtpTransport(userId) {
 /**
  * Interpolate {{firstName}}, {{lastName}}, {{company}}, {{email}} tokens in subject/body.
  */
-function interpolate(template, prospect) {
-  return template
-    .replace(/\{\{firstName\}\}/gi, prospect.firstName || '')
-    .replace(/\{\{lastName\}\}/gi, prospect.lastName || '')
-    .replace(/\{\{company\}\}/gi, prospect.companyName || '')
-    .replace(/\{\{email\}\}/gi, prospect.email || '')
-    .replace(/\{\{title\}\}/gi, prospect.title || '');
+function interpolate(template, prospect, sender = null) {
+  if (!template) return '';
+  let out = template
+    .replace(/\{\{firstName\}\}/gi,   prospect.firstName || '')
+    .replace(/\{\{first_name\}\}/gi,  prospect.firstName || '')
+    .replace(/\{\{lastName\}\}/gi,    prospect.lastName  || '')
+    .replace(/\{\{last_name\}\}/gi,   prospect.lastName  || '')
+    .replace(/\{\{company\}\}/gi,     prospect.companyName || '')
+    .replace(/\{\{companyName\}\}/gi, prospect.companyName || '')
+    .replace(/\{\{email\}\}/gi,       prospect.email || '')
+    .replace(/\{\{title\}\}/gi,       prospect.title || '');
+
+  // Sender tokens — derived from the sequence owner's User record. Used
+  // for sign-offs like "Thanks,\n{{sender.name}}". Fallback to the email
+  // local part when the User.name field is empty.
+  if (sender) {
+    const fullName    = sender.name || (sender.email ? sender.email.split('@')[0] : '');
+    const firstName   = fullName.split(' ')[0] || '';
+    const lastName    = fullName.split(' ').slice(1).join(' ') || '';
+    const email       = sender.email || '';
+    out = out
+      .replace(/\{\{sender\.name\}\}/gi,      fullName)
+      .replace(/\{\{senderName\}\}/gi,        fullName)
+      .replace(/\{\{sender\.firstName\}\}/gi, firstName)
+      .replace(/\{\{sender\.first_name\}\}/gi, firstName)
+      .replace(/\{\{sender\.lastName\}\}/gi,  lastName)
+      .replace(/\{\{sender\.last_name\}\}/gi, lastName)
+      .replace(/\{\{sender\.email\}\}/gi,     email)
+      .replace(/\{\{senderEmail\}\}/gi,       email);
+  }
+  return out;
 }
 
 /**
@@ -255,8 +279,11 @@ async function sendApprovedDraft(enrollment, step, draft) {
     where: { id: enrollment.prospectId },
   });
   const ownerId = enrollment.sequence?.userId;
-  const subject = draft.subject;
-  const body    = draft.draftBody;
+  const sender  = ownerId ? await prisma.user.findUnique({ where: { id: ownerId } }) : null;
+  // Interpolate any tokens (sender.name etc.) the LLM kept verbatim in
+  // the approved draft — these aren't resolved until send time.
+  const subject = interpolate(draft.subject || '',   prospect, sender);
+  const body    = interpolate(draft.draftBody || '', prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
   const htmlBody = `${body.replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
@@ -436,8 +463,9 @@ async function sendStepEmail(enrollment, step) {
 
   const { prospect } = enrollment;
   const ownerId = enrollment.sequence?.userId;
-  const subject = interpolate(step.subject, prospect);
-  const body    = interpolate(step.body, prospect);
+  const sender  = ownerId ? await prisma.user.findUnique({ where: { id: ownerId } }) : null;
+  const subject = interpolate(step.subject, prospect, sender);
+  const body    = interpolate(step.body, prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
   const htmlBody = `${body.replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
