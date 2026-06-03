@@ -283,14 +283,23 @@ const Prospects = () => {
     if (!seqId) return;
     setEnrollingSeqId(seqId);
     setEnrollStatus(null);
-    const count = selectedIds.size;
     try {
-      await api.post(`/sequences/${seqId}/enroll`, { prospectIds: [...selectedIds] });
+      const res = await api.post(`/sequences/${seqId}/enroll`, { prospectIds: [...selectedIds] });
       const seq = sequences.find(s => s.id === seqId);
+      const enrolled = res.data?.enrolled ?? 0;
+      const skipped  = res.data?.skipped  ?? 0;
+
       setSelectedIds(new Set());
       fetchProspects();
       setShowSeqModal(false);
-      toast(`${count} prospect${count !== 1 ? 's' : ''} enrolled in "${seq?.name}"`, 'success');
+
+      if (enrolled === 0 && skipped > 0) {
+        toast(`No prospects enrolled — all ${skipped} are already in a sequence`, 'warning', 4500);
+      } else if (skipped > 0) {
+        toast(`${enrolled} enrolled in "${seq?.name}" · ${skipped} skipped (already in a sequence)`, 'success', 4500);
+      } else {
+        toast(`${enrolled} prospect${enrolled !== 1 ? 's' : ''} enrolled in "${seq?.name}"`, 'success');
+      }
     } catch (err) {
       setEnrollStatus({ type: 'error', msg: err.response?.data?.message || 'Enrollment failed' });
       toast('Enrollment failed — please try again', 'error');
@@ -887,7 +896,7 @@ const Prospects = () => {
               <div>
                 <h3 style={{ margin: 0 }}>Enroll in Sequence</h3>
                 <p style={{ margin: '3px 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                  {selectedIds.size} prospect{selectedIds.size > 1 ? 's' : ''} selected
+                  {selectedIds.size} prospect{selectedIds.size > 1 ? 's' : ''} selected · Prospects already in an active sequence are skipped
                 </p>
               </div>
               <button className="ghost" style={{ padding: '4px 8px', color: 'var(--text-muted)' }} onClick={() => setShowSeqModal(false)}>✕</button>

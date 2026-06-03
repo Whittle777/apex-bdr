@@ -51,18 +51,46 @@ router.post('/:id/enroll', async (req, res) => {
     return res.status(400).json({ message: 'prospectIds array required' });
   }
   try {
-    const enrollments = await enrollProspects(sequenceId, prospectIds.map(Number), req.userId);
+    const ids = prospectIds.map(Number);
 
-    // Kick off AI draft generation immediately so the user sees drafts in
-    // the Review Queue right away instead of waiting up to 30 min for the
-    // next pre-draft cron tick. Fire-and-forget — errors are logged but
-    // don't block the enroll response.
-    const { prepareUpcomingDrafts } = require('../services/sequenceMailer');
-    prepareUpcomingDrafts().catch(err => {
-      console.error('[enroll] post-enroll prepareUpcomingDrafts failed:', err.message);
+    // Skip prospects already in ANY active sequence (whether this one or
+    // a different one). Business rule: a prospect should only be in one
+    // active sequence at a time. Already-completed / opted-out
+    // enrollments don't count, so re-engagement is still allowed.
+    const alreadyActive = await prisma.sequenceEnrollment.findMany({
+      where: {
+        prospectId: { in: ids },
+        status: { in: ['active', 'paused'] },
+      },
+      select: { prospectId: true, sequenceId: true, sequence: { select: { name: true } } },
     });
+    const skippedIds = new Set(alreadyActive.map(e => e.prospectId));
+    const enrollableIds = ids.filter(id => !skippedIds.has(id));
 
-    res.json(enrollments);
+    let enrollments = [];
+    if (enrollableIds.length > 0) {
+      enrollments = await enrollProspects(sequenceId, enrollableIds, req.userId);
+
+      // Kick off AI draft generation immediately so the user sees drafts in
+      // the Review Queue right away instead of waiting up to 30 min for the
+      // next pre-draft cron tick. Fire-and-forget — errors are logged but
+      // don't block the enroll response.
+      const { prepareUpcomingDrafts } = require('../services/sequenceMailer');
+      prepareUpcomingDrafts().catch(err => {
+        console.error('[enroll] post-enroll prepareUpcomingDrafts failed:', err.message);
+      });
+    }
+
+    res.json({
+      enrollments,
+      enrolled: enrollments.length,
+      skipped: alreadyActive.length,
+      skippedDetails: alreadyActive.map(e => ({
+        prospectId: e.prospectId,
+        currentSequenceId: e.sequenceId,
+        currentSequenceName: e.sequence?.name || null,
+      })),
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
