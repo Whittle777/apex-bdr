@@ -6,18 +6,6 @@ import { SetupTooltipBlock } from './SetupTooltip';
 import { STEP_TYPE_CONFIG, ENROLLMENT_STATUS_STYLES } from '../constants';
 import RichTextEditor from './RichTextEditor';
 
-// Simulates per-step performance stats using the step's id as a deterministic seed.
-// In a real implementation these would come from the email tracking / activity API.
-function seedStats(stepId) {
-  const h = String(stepId).split('').reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 7);
-  const openRate  = 20 + Math.abs(h % 45);           // 20–65%
-  const clickRate = Math.round(openRate * (0.08 + Math.abs((h >> 3) % 18) / 100)); // 8–26% of opens
-  const replyRate = Math.round(openRate * (0.04 + Math.abs((h >> 6) % 12) / 100)); // 4–16% of opens
-  const sent      = 10 + Math.abs((h >> 2) % 90);    // 10–100 sent
-  return { openRate, clickRate, replyRate, sent };
-}
-
-
 const STATUS_DOT_COLORS = {
   active:    'var(--status-info)',
   paused:    'var(--status-warning)',
@@ -142,7 +130,11 @@ const SequenceManager = () => {
   };
 
   useEffect(() => {
-    if (activeTab === 'emails' && activeSequenceId) fetchEmails(activeSequenceId);
+    // Also fetch on Steps tab so per-step stat panels can compute from
+    // real EmailActivity counts (otherwise the panels just don't render).
+    if ((activeTab === 'emails' || activeTab === 'steps') && activeSequenceId) {
+      fetchEmails(activeSequenceId);
+    }
   }, [activeTab, activeSequenceId]);
 
   // Reset email/call/reply state when sequence changes
@@ -1100,15 +1092,21 @@ const SequenceManager = () => {
                                 </div>
                               )
                             )}
+                            {/* Per-step stats: only render when we have real EmailActivity
+                                counts for this step in emailItems. Honest empty otherwise. */}
                             {['AUTO_EMAIL','MANUAL_EMAIL'].includes(step.stepType || 'AUTO_EMAIL') && (() => {
-                              const stats = seedStats(step.id);
+                              const acts = emailItems.filter(it => it.type === 'activity' && it.sequenceStepId === step.id);
+                              if (acts.length === 0) return null;
+                              const sent   = acts.filter(a => a.status === 'sent' || a.status === 'opened').length;
+                              const opened = acts.filter(a => a.status === 'opened').length;
+                              const failed = acts.filter(a => a.status === 'failed').length;
+                              const openRate = sent > 0 ? Math.round((opened / sent) * 100) : 0;
                               return (
-                                <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:0, marginTop:10, borderTop:'1px solid var(--border-subtle)', paddingTop:8 }}>
+                                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:0, marginTop:10, borderTop:'1px solid var(--border-subtle)', paddingTop:8 }}>
                                   {[
-                                    { label:'Sent',  value:stats.sent,              color:'var(--text-secondary)' },
-                                    { label:'Open',  value:`${stats.openRate}%`,    color:stats.openRate  >= 40 ? 'var(--status-success)' : stats.openRate  >= 25 ? 'var(--status-warning)' : 'var(--status-danger)' },
-                                    { label:'Click', value:`${stats.clickRate}%`,   color:stats.clickRate >= 8  ? 'var(--status-success)' : 'var(--text-secondary)' },
-                                    { label:'Reply', value:`${stats.replyRate}%`,   color:stats.replyRate >= 5  ? 'var(--status-success)' : 'var(--text-secondary)' },
+                                    { label:'Sent',   value: sent,                  color:'var(--text-secondary)' },
+                                    { label:'Opened', value: `${openRate}%`,        color: sent === 0 ? 'var(--text-muted)' : openRate >= 40 ? 'var(--status-success)' : openRate >= 25 ? 'var(--status-warning)' : 'var(--status-danger)' },
+                                    { label:'Failed', value: failed,                color: failed > 0 ? 'var(--status-danger)' : 'var(--text-secondary)' },
                                   ].map(({ label, value, color }, i, arr) => (
                                     <div key={label} style={{ textAlign:'center', borderRight: i < arr.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
                                       <div style={{ fontSize:'0.62rem', color:'var(--text-muted)', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:2 }}>{label}</div>

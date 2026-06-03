@@ -31,14 +31,6 @@ const StatCard = ({ label, value, sub, trend, icon, color }) => (
 );
 
 
-const LEADERBOARD = [
-  { name: 'Henry Whittle', emails: 148, calls: 42, meetings: 9, quota: 87, avatar: 'HW' },
-  { name: 'Sarah Mitchell', emails: 122, calls: 38, meetings: 11, quota: 94, avatar: 'SM' },
-  { name: 'James Okafor', emails: 135, calls: 29, meetings: 7, quota: 72, avatar: 'JO' },
-  { name: 'Priya Kapoor', emails: 98, calls: 51, meetings: 13, quota: 103, avatar: 'PK' },
-  { name: 'Tom Gallagher', emails: 87, calls: 22, meetings: 5, quota: 61, avatar: 'TG' },
-];
-
 // Compute calendar-aligned start/end for the chosen period.
 // week    → Monday 00:00 of this week through Sunday 23:59
 // month   → 1st of this month 00:00 through end of month 23:59
@@ -115,15 +107,6 @@ const AnalyticsDashboard = () => {
 
   // Total active enrollments across all sequences
   const totalEnrollments = sequences.reduce((acc, s) => acc + (s.prospectEnrollments?.filter(e => e.status === 'active').length || 0), 0);
-
-  // Quota / forecasting — derived from real prospect data
-  const MEETINGS_TARGET = 15;
-  const AVG_DEAL_SIZE    = 28_400;
-  const REVENUE_TARGET   = 500_000;
-  const actualRevenue    = meetings * AVG_DEAL_SIZE;
-  const quotaAttainment  = Math.min(100, Math.round((actualRevenue / REVENUE_TARGET) * 100));
-  const projectedRevenue = Math.round(actualRevenue * 1.18); // AI uplift factor
-  const coverageRatio    = totalEnrollments > 0 ? (totalEnrollments / Math.max(meetings, 1) / 3).toFixed(1) : '—';
 
   // Sequence performance rows (sort by enrollment count)
   const seqPerf = sequences
@@ -312,14 +295,14 @@ const AnalyticsDashboard = () => {
       {/* My Progress — rep-level activity summary */}
       <div style={{ backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: 18 }}>
         <h4 style={{ marginBottom: 4 }}>My Progress</h4>
-        <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginBottom: 16 }}>Q2 2026 · key activities at a glance</p>
+        <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginBottom: 16 }}>{formatRange(range)} · key activities at a glance</p>
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
           {[
-            { label: 'Meetings Booked', value: meetings, note: `target: ${MEETINGS_TARGET}`, color: meetings >= MEETINGS_TARGET ? 'var(--status-success)' : 'var(--accent-primary)' },
-            { label: 'Reply Rate', value: `${replyRate}%`, note: replied > 0 ? `${replied} of ${totalProspects} replied` : 'No replies yet', color: replyRate >= 10 ? 'var(--status-success)' : replyRate > 0 ? 'var(--status-warning)' : 'var(--text-muted)' },
-            { label: 'Meeting Conversion', value: `${meetingRate}%`, note: `${meetings} meetings from ${totalProspects} prospects`, color: 'var(--accent-primary)' },
-            { label: 'Active Sequences', value: sequences.length, note: `${totalEnrollments} enrolled prospects`, color: 'var(--status-info)' },
+            { label: 'Meetings Booked', value: meetings, note: meetings > 0 ? `${meetings} from ${totalProspects} prospects` : 'No meetings yet', color: meetings > 0 ? 'var(--accent-primary)' : 'var(--text-muted)' },
+            { label: 'Reply Rate', value: totalProspects > 0 ? `${replyRate}%` : '—', note: replied > 0 ? `${replied} of ${totalProspects} replied` : 'No replies yet', color: replyRate >= 10 ? 'var(--status-success)' : replyRate > 0 ? 'var(--status-warning)' : 'var(--text-muted)' },
+            { label: 'Meeting Conversion', value: totalProspects > 0 ? `${meetingRate}%` : '—', note: totalProspects > 0 ? `${meetings} meetings from ${totalProspects} prospects` : 'No prospects yet', color: totalProspects > 0 ? 'var(--accent-primary)' : 'var(--text-muted)' },
+            { label: 'Active Sequences', value: sequences.length, note: sequences.length > 0 ? `${totalEnrollments} enrolled prospects` : 'No sequences yet', color: sequences.length > 0 ? 'var(--status-info)' : 'var(--text-muted)' },
           ].map(item => (
             <div key={item.label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 14px', backgroundColor: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)' }}>
               <div>
@@ -331,15 +314,6 @@ const AnalyticsDashboard = () => {
           ))}
         </div>
       </div>
-
-      {/* LEADERBOARD — kept for future use, hidden until competitive features are enabled
-      <div style={{ backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: 18 }}>
-        <h4>Rep Leaderboard</h4>
-        {[...LEADERBOARD].sort((a, b) => b.quota - a.quota).map((rep, i) => (
-          <div key={rep.name}>...</div>
-        ))}
-      </div>
-      */}
     </div>
   );
 };
