@@ -39,10 +39,42 @@ const LEADERBOARD = [
   { name: 'Tom Gallagher', emails: 87, calls: 22, meetings: 5, quota: 61, avatar: 'TG' },
 ];
 
+// Compute calendar-aligned start/end for the chosen period.
+// week    → Monday 00:00 of this week through Sunday 23:59
+// month   → 1st of this month 00:00 through end of month 23:59
+// quarter → 1st of the current quarter 00:00 through end of quarter 23:59
+const periodRange = (period) => {
+  const now = new Date();
+  const start = new Date(now);
+  const end = new Date(now);
+  if (period === 'week') {
+    // ISO week: Monday start
+    const day = (start.getDay() + 6) % 7; // Mon=0 ... Sun=6
+    start.setDate(start.getDate() - day);
+    end.setDate(start.getDate() + 6);
+  } else if (period === 'month') {
+    start.setDate(1);
+    end.setMonth(start.getMonth() + 1, 0); // last day of month
+  } else if (period === 'quarter') {
+    const qStartMonth = Math.floor(start.getMonth() / 3) * 3;
+    start.setMonth(qStartMonth, 1);
+    end.setMonth(qStartMonth + 3, 0);
+  }
+  start.setHours(0, 0, 0, 0);
+  end.setHours(23, 59, 59, 999);
+  return { start, end };
+};
+
+const formatRange = ({ start, end }) => {
+  const fmt = (d) => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return `${fmt(start)} – ${fmt(end)}`;
+};
+
 const AnalyticsDashboard = () => {
   const [period, setPeriod] = useState('week');
   const [prospects, setProspects] = useState([]);
   const [sequences, setSequences] = useState([]);
+  const [emailStats, setEmailStats] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -59,6 +91,18 @@ const AnalyticsDashboard = () => {
     };
     fetch();
   }, []);
+
+  // Re-fetch email stats when the period changes
+  useEffect(() => {
+    const { start, end } = periodRange(period);
+    api.get('/email-activities/stats', {
+      params: { since: start.toISOString(), until: end.toISOString() },
+    })
+      .then(r => setEmailStats(r.data))
+      .catch(err => console.error('[analytics/stats]', err));
+  }, [period]);
+
+  const range = periodRange(period);
 
   const totalProspects = prospects.length;
   const replied = prospects.filter(p => p.status === 'Replied').length;
@@ -120,7 +164,9 @@ const AnalyticsDashboard = () => {
       <div className="page-header">
         <div>
           <h1 style={{ marginBottom: 4 }}>Analytics</h1>
-          <p className="page-header-meta">Q2 2026 · Your pipeline at a glance</p>
+          <p className="page-header-meta">
+            {formatRange(range)} · {period === 'week' ? 'this week' : period === 'month' ? 'this month' : 'this quarter'}
+          </p>
         </div>
         <div className="pill-group">
           {['week', 'month', 'quarter'].map(p => (
@@ -132,9 +178,9 @@ const AnalyticsDashboard = () => {
       </div>
 
       {/* KPI Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
         {loading ? (
-          [1,2,3,4].map(i => (
+          [1,2,3,4,5].map(i => (
             <div key={i} className="metric-card" style={{ flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 72 }}>
               <div className="skeleton" style={{ width: 36, height: 36, borderRadius: 'var(--radius-sm)', flexShrink: 0 }} />
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -147,6 +193,16 @@ const AnalyticsDashboard = () => {
         ) : (
           <>
             <StatCard label="Total Prospects" value={totalProspects} sub={`${uncontacted} uncontacted`} trend={undefined} icon="👥" color="var(--accent-dim)" />
+            <StatCard
+              label="Emails Sent"
+              value={emailStats ? emailStats.sent : '—'}
+              sub={emailStats
+                ? `${emailStats.opened || 0} opened · ${emailStats.failed || 0} failed`
+                : 'loading…'}
+              trend={undefined}
+              icon="📤"
+              color="var(--accent-soft)"
+            />
             <StatCard label="Active Enrollments" value={totalEnrollments} sub={`across ${sequences.length} sequences`} trend={undefined} icon="✉️" color="var(--accent-soft)" />
             <StatCard label="Reply Rate" value={`${replyRate}%`} sub={`${replied} of ${totalProspects} replied`} trend={undefined} icon="💬" color="var(--status-success-soft)" />
             <StatCard label="Meetings Booked" value={meetings} sub={`${meetingRate}% conversion`} trend={undefined} icon="📅" color="var(--status-warning-soft)" />

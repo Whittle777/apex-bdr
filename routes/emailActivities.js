@@ -116,6 +116,51 @@ router.patch('/enrollment/:enrollmentId/cancel', async (req, res) => {
  * Reschedule a scheduled email — updates nextStepDue.
  * Body: { scheduledFor: ISO date string }
  */
+// GET /email-activities/stats?since=ISO&until=ISO
+// Returns per-status counts for EmailActivity rows whose sentAt (for sent
+// records) or createdAt (for non-sent — e.g. failed, opened, drafts)
+// falls in the range. Used by Analytics for the "Emails Sent" KPI.
+router.get('/stats', async (req, res) => {
+  try {
+    const since = req.query.since ? new Date(req.query.since) : new Date(0);
+    const until = req.query.until ? new Date(req.query.until) : new Date();
+    if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) {
+      return res.status(400).json({ message: 'Invalid since/until' });
+    }
+
+    // For 'sent' / 'opened' we anchor on sentAt; for the rest, createdAt.
+    // Counted via separate queries so the date column matches semantics.
+    const [sent, opened, failed, draftPending, approved] = await Promise.all([
+      prisma.emailActivity.count({
+        where: { status: 'sent', sentAt: { gte: since, lte: until } },
+      }),
+      prisma.emailActivity.count({
+        where: { status: 'opened', sentAt: { gte: since, lte: until } },
+      }),
+      prisma.emailActivity.count({
+        where: { status: 'failed', createdAt: { gte: since, lte: until } },
+      }),
+      prisma.emailActivity.count({
+        where: { status: 'draft_pending', createdAt: { gte: since, lte: until } },
+      }),
+      prisma.emailActivity.count({
+        where: { status: 'approved', createdAt: { gte: since, lte: until } },
+      }),
+    ]);
+
+    res.json({
+      since: since.toISOString(),
+      until: until.toISOString(),
+      sent, opened, failed, draftPending, approved,
+      // Total "delivered or attempted" — useful as the headline number
+      totalAttempts: sent + failed,
+    });
+  } catch (err) {
+    console.error('[email-stats]', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // POST /email-activities/run-now
 // Force-run the lookahead drafter and the send pass immediately, instead of
 // waiting for the next cron tick. Useful for testing and for unsticking a
