@@ -123,19 +123,21 @@ async function sendViaGraph(accessToken, fromEmail, toEmail, subject, htmlBody) 
 }
 
 /**
- * Find the most recent sent EmailActivity for an enrollment and return its
- * stored externalMessageId (the RFC 5322 internetMessageId Outlook gave us
- * at send time). Used as the "reply to this" anchor for threaded follow-up
- * steps. Returns null when no prior sent email exists.
+ * Find the most recent sent EmailActivity for an enrollment. Returns the
+ * stored externalMessageId (may be null) and whether ANY prior sent
+ * email exists. Threading falls back to a recipient-based Sent Items
+ * lookup in sendReplyViaGraph when the internetMessageId is absent, so
+ * the existence flag is what gates reply-vs-fresh-send.
  */
-async function findPriorInternetMessageId(enrollmentId) {
-  if (!enrollmentId) return null;
+async function findPriorSentForEnrollment(enrollmentId) {
+  if (!enrollmentId) return { exists: false, externalMessageId: null };
   const prior = await prisma.emailActivity.findFirst({
-    where: { enrollmentId, status: 'sent', externalMessageId: { not: null } },
+    where: { enrollmentId, status: 'sent' },
     orderBy: { sentAt: 'desc' },
     select: { externalMessageId: true },
   });
-  return prior?.externalMessageId || null;
+  if (!prior) return { exists: false, externalMessageId: null };
+  return { exists: true, externalMessageId: prior.externalMessageId || null };
 }
 
 /**
@@ -149,22 +151,53 @@ async function findPriorInternetMessageId(enrollmentId) {
  * should handle by sending a fresh email or letting the SMTP path try.
  */
 async function sendReplyViaGraph(accessToken, originalInternetMessageId, toEmail, htmlBody) {
-  if (!originalInternetMessageId) throw new Error('No prior internetMessageId to reply to');
+  // 1. Resolve Graph resource id for the prior message. Try the stored
+  //    internetMessageId first; if that lookup fails (the post-send
+  //    read-back can race the index), fall back to listing the most
+  //    recent messages in Sent Items addressed to this recipient.
+  let graphMessageId = null;
+  let lookupError = null;
 
-  // 1. Resolve Graph resource id from the RFC 5322 Message-ID.
-  let graphMessageId;
-  try {
-    const escId = originalInternetMessageId.replace(/'/g, "''");
-    const lookup = await axios.get(
-      `https://graph.microsoft.com/v1.0/me/messages` +
-      `?$top=1&$select=id&$filter=internetMessageId eq '${escId}'`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    graphMessageId = lookup.data?.value?.[0]?.id;
-    if (!graphMessageId) throw new Error(`No Outlook message with internetMessageId ${originalInternetMessageId}`);
-  } catch (err) {
-    const detail = err.response?.data?.error?.message || err.message;
-    throw new Error(`Graph message lookup failed: ${detail}`);
+  if (originalInternetMessageId) {
+    try {
+      const escId = originalInternetMessageId.replace(/'/g, "''");
+      const lookup = await axios.get(
+        `https://graph.microsoft.com/v1.0/me/messages` +
+        `?$top=1&$select=id&$filter=internetMessageId eq '${escId}'`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      graphMessageId = lookup.data?.value?.[0]?.id || null;
+    } catch (err) {
+      lookupError = err.response?.data?.error?.message || err.message;
+    }
+  }
+
+  // Fallback: find the most recent message we sent to this recipient.
+  if (!graphMessageId) {
+    try {
+      const sinceIso = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString(); // 60 days
+      const res = await axios.get(
+        'https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages' +
+        `?$top=25&$orderby=sentDateTime desc` +
+        `&$select=id,internetMessageId,toRecipients,sentDateTime,subject` +
+        `&$filter=sentDateTime ge ${sinceIso}`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const candidates = res.data?.value || [];
+      const match = candidates.find(m =>
+        (m.toRecipients || []).some(r => r.emailAddress?.address?.toLowerCase() === toEmail.toLowerCase())
+      );
+      graphMessageId = match?.id || null;
+      if (graphMessageId) {
+        console.log(`[Reply] Resolved prior message via Sent Items recipient lookup (${toEmail})`);
+      }
+    } catch (err) {
+      lookupError = (lookupError ? lookupError + ' | ' : '') + (err.response?.data?.error?.message || err.message);
+    }
+  }
+
+  if (!graphMessageId) {
+    throw new Error(`Could not find a prior message to reply to for ${toEmail}${lookupError ? ` — ${lookupError}` : ''}`);
   }
 
   // 2. POST /reply with our body overriding the auto-generated reply.
@@ -421,17 +454,20 @@ async function sendApprovedDraft(enrollment, step, draft) {
   const bodyHtml = looksLikeHtml(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
   const htmlBody = `${bodyHtml}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
 
-  // If this step is configured to reply in-thread, look up the most
-  // recent sent EmailActivity for this enrollment.
-  const priorMessageId = step.replyToPrevious
-    ? await findPriorInternetMessageId(enrollment.id)
-    : null;
+  // If this step is configured to reply in-thread, check whether ANY
+  // prior sent email exists for this enrollment. The reply send itself
+  // resolves the actual Outlook message via Sent Items recipient lookup,
+  // so we no longer need the prior message's internetMessageId stored.
+  const prior = step.replyToPrevious
+    ? await findPriorSentForEnrollment(enrollment.id)
+    : { exists: false, externalMessageId: null };
+  const replyMode = step.replyToPrevious && prior.exists;
 
   let externalMessageId = null;
   try {
     const { accessToken, fromEmail } = await getMicrosoftAccessToken(ownerId);
-    if (step.replyToPrevious && priorMessageId) {
-      externalMessageId = await sendReplyViaGraph(accessToken, priorMessageId, prospect.email, htmlBody);
+    if (replyMode) {
+      externalMessageId = await sendReplyViaGraph(accessToken, prior.externalMessageId, prospect.email, htmlBody);
     } else {
       externalMessageId = await sendViaGraph(accessToken, fromEmail, prospect.email, subject, htmlBody);
     }
@@ -444,16 +480,16 @@ async function sendApprovedDraft(enrollment, step, draft) {
       // SMTP threading: if this is a reply, prepend "Re: " and include
       // In-Reply-To / References headers (SMTP allows custom headers
       // without Microsoft's "x-" restriction).
-      const smtpSubject = step.replyToPrevious && priorMessageId
+      const smtpSubject = replyMode
         ? (subject.toLowerCase().startsWith('re:') ? subject : `Re: ${subject}`)
         : subject;
       const smtpHeaders = {
         'List-Unsubscribe':      `<${unsubscribeUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       };
-      if (step.replyToPrevious && priorMessageId) {
-        smtpHeaders['In-Reply-To'] = priorMessageId;
-        smtpHeaders['References']  = priorMessageId;
+      if (replyMode && prior.externalMessageId) {
+        smtpHeaders['In-Reply-To'] = prior.externalMessageId;
+        smtpHeaders['References']  = prior.externalMessageId;
       }
       const info = await transporter.sendMail({
         from: `"${fromName}" <${smtpUser}>`,
