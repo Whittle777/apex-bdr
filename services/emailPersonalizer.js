@@ -146,6 +146,7 @@ function buildHistorySection({ emails, replies }) {
 function buildStepSection(step) {
   return compactList([
     `Step Order: ${step.order} (delay ${step.delayDays} days)`,
+    step.replyToPrevious && `THREAD CONTINUATION: This step sends as a reply in the existing email thread (same Outlook conversation as the prior sent email).`,
     step.aiPurpose && `Intent: ${step.aiPurpose}`,
     step.aiInstructions && `Voice/Style/Constraints:\n${step.aiInstructions}`,
     step.subject && `Reference subject template: ${step.subject}`,
@@ -208,6 +209,21 @@ DO NOT:
 If both research blocks are empty, write a generic opener based on the
 prospect's title + company, keep everything else from the template
 verbatim, and note this in the reasoning field.
+
+REPLY STEPS (when "THREAD CONTINUATION" is noted in the step brief):
+- Write this as a short follow-up note to the prior email in the
+  thread, NOT a fresh standalone pitch. Skip the full product pitch
+  re-state; the prior email in the thread already delivered it.
+- 40-100 words total. One short paragraph or two at most.
+- Start with a brief contextual nudge ("Following up on this — ",
+  "Wanted to circle back on the note below — ", etc.) that
+  references the thread implicitly. No greeting like "Hi {{first_name}}",
+  because this is a reply in an open thread.
+- Add one piece of new value: a relevant case study, a specific
+  question, a fresh data point, or a calendar link / time options.
+- Subject line is ignored at send time (Outlook auto-prefixes "Re: "
+  on the original subject). Still output a value (the template
+  subject works); it just won't be used for the actual send.
 
 USE THE PRIOR OUTREACH SECTION:
 - Do NOT reuse the opener angle or hook from any previous email in

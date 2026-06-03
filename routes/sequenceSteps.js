@@ -9,6 +9,7 @@ router.post('/', async (req, res) => {
   const {
     sequenceId, order, delayDays, subject, body, stepType,
     aiPersonalize, aiPurpose, aiInstructions, aiModel,
+    replyToPrevious,
   } = req.body;
   try {
     const step = await prisma.sequenceStep.create({
@@ -23,6 +24,7 @@ router.post('/', async (req, res) => {
         aiPurpose: aiPurpose || null,
         aiInstructions: aiInstructions || null,
         aiModel: aiModel || null,
+        replyToPrevious: !!replyToPrevious,
       }
     });
     res.status(201).json(step);
@@ -59,6 +61,7 @@ router.put('/:id', async (req, res) => {
   const {
     order, delayDays, subject, body, stepType,
     aiPersonalize, aiPurpose, aiInstructions, aiModel,
+    replyToPrevious,
   } = req.body;
   try {
     const step = await prisma.sequenceStep.update({
@@ -66,10 +69,11 @@ router.put('/:id', async (req, res) => {
       data: {
         order, delayDays, subject, body,
         ...(stepType && { stepType }),
-        ...(aiPersonalize !== undefined  && { aiPersonalize: !!aiPersonalize }),
-        ...(aiPurpose !== undefined      && { aiPurpose: aiPurpose || null }),
-        ...(aiInstructions !== undefined && { aiInstructions: aiInstructions || null }),
-        ...(aiModel !== undefined        && { aiModel: aiModel || null }),
+        ...(aiPersonalize !== undefined   && { aiPersonalize: !!aiPersonalize }),
+        ...(aiPurpose !== undefined       && { aiPurpose: aiPurpose || null }),
+        ...(aiInstructions !== undefined  && { aiInstructions: aiInstructions || null }),
+        ...(aiModel !== undefined         && { aiModel: aiModel || null }),
+        ...(replyToPrevious !== undefined && { replyToPrevious: !!replyToPrevious }),
       }
     });
     res.json(step);
