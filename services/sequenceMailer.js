@@ -368,63 +368,105 @@ function interpolate(template, prospect, sender = null) {
  * Idempotent: skips if a draft for this enrollment+step already exists in
  * any of draft_pending / approved / sent.
  */
+// In-process lock to prevent concurrent createPersonalizedDraft calls
+// for the same enrollment+step from racing and producing duplicate
+// draft_pending rows. The Prisma schema has no partial unique index
+// on (enrollmentId, sequenceStepId) where status='draft_pending', so
+// app-level serialization is the simplest dedupe. Multiple cron /
+// trigger paths can fire concurrently; this Map ensures only one
+// passes the existence check + insert at a time.
+const draftCreationLocks = new Map();
+
 async function createPersonalizedDraft(enrollment, step) {
-  const existing = await prisma.emailActivity.findFirst({
-    where: {
-      enrollmentId: enrollment.id,
-      sequenceStepId: step.id,
-      status: { in: ['draft_pending', 'approved', 'sent'] },
-    },
-  });
-  if (existing) return existing;
+  const key = `${enrollment.id}:${step.id}`;
+  // If another caller is already creating this draft, wait for that
+  // promise to settle and reuse the result.
+  const inflight = draftCreationLocks.get(key);
+  if (inflight) return inflight;
 
-  const prospect = await prisma.prospect.findUnique({
-    where: { id: enrollment.prospectId },
-    include: { account: true },
-  });
+  const work = (async () => {
+    const existing = await prisma.emailActivity.findFirst({
+      where: {
+        enrollmentId: enrollment.id,
+        sequenceStepId: step.id,
+        status: { in: ['draft_pending', 'approved', 'sent'] },
+      },
+    });
+    if (existing) return existing;
 
-  let draft;
-  try {
-    draft = await personalize({ step, prospect, account: prospect.account });
-  } catch (err) {
-    await prisma.emailActivity.create({
+    const prospect = await prisma.prospect.findUnique({
+      where: { id: enrollment.prospectId },
+      include: { account: true },
+    });
+
+    let draft;
+    try {
+      draft = await personalize({ step, prospect, account: prospect.account });
+    } catch (err) {
+      await prisma.emailActivity.create({
+        data: {
+          prospectId: enrollment.prospectId,
+          sequenceStepId: step.id,
+          enrollmentId: enrollment.id,
+          status: 'failed',
+          subject: interpolate(step.subject || '', prospect),
+          failureReason: `Personalization failed: ${err.message}`,
+        },
+      });
+      throw err;
+    }
+
+    const draftRow = await prisma.emailActivity.create({
       data: {
         prospectId: enrollment.prospectId,
         sequenceStepId: step.id,
         enrollmentId: enrollment.id,
-        status: 'failed',
-        subject: interpolate(step.subject || '', prospect),
-        failureReason: `Personalization failed: ${err.message}`,
+        status: 'draft_pending',
+        subject: draft.subject,
+        scheduledFor: enrollment.nextStepDue || new Date(),
+        draftBody: draft.body,
+        draftPrompt: draft.prompt,
+        draftReasoning: draft.reasoning,
+        draftModel: draft.model,
+        draftProvider: draft.provider,
       },
     });
-    throw err;
+
+    // Belt-and-braces: if a parallel writer slipped through (different
+    // process / restart), cancel any extra draft_pending rows for this
+    // slot and keep just the oldest. The Review Queue + send path see
+    // only one draft per enrollment+step.
+    await dedupePendingDrafts(enrollment.id, step.id);
+
+    return draftRow;
+  })();
+
+  draftCreationLocks.set(key, work);
+  try {
+    return await work;
+  } finally {
+    draftCreationLocks.delete(key);
   }
+}
 
-  const draftRow = await prisma.emailActivity.create({
-    data: {
-      prospectId: enrollment.prospectId,
-      sequenceStepId: step.id,
-      enrollmentId: enrollment.id,
-      status: 'draft_pending',
-      subject: draft.subject,
-      // Anchor scheduledFor to when the email should actually go out
-      // (enrollment.nextStepDue). The review queue uses this to sort and
-      // to enforce send timing after approval.
-      scheduledFor: enrollment.nextStepDue || new Date(),
-      draftBody: draft.body,
-      draftPrompt: draft.prompt,
-      draftReasoning: draft.reasoning,
-      draftModel: draft.model,
-      draftProvider: draft.provider,
-    },
+/**
+ * Cancel duplicate draft_pending rows for a given enrollment+step,
+ * keeping only the oldest. Idempotent — safe to call any time, no-op
+ * when there's already one or zero pending drafts.
+ */
+async function dedupePendingDrafts(enrollmentId, sequenceStepId) {
+  const pending = await prisma.emailActivity.findMany({
+    where: { enrollmentId, sequenceStepId, status: 'draft_pending' },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true },
   });
-
-  // No longer push to the legacy in-memory HITL queue — the durable
-  // EmailActivity row above is the source of truth for the Review
-  // Queue UI. Pushing here caused duplicates ("Queue Item #N" entries
-  // shadowing every real draft).
-
-  return draftRow;
+  if (pending.length <= 1) return;
+  const dupeIds = pending.slice(1).map(r => r.id);
+  await prisma.emailActivity.updateMany({
+    where: { id: { in: dupeIds } },
+    data: { status: 'cancelled', failureReason: 'Duplicate draft (deduped automatically)' },
+  });
+  console.log(`[dedupe] cancelled ${dupeIds.length} duplicate draft(s) for enrollment ${enrollmentId} step ${sequenceStepId}`);
 }
 
 /**
@@ -537,6 +579,15 @@ async function sendApprovedDraft(enrollment, step, draft) {
     }),
   ]);
 
+  // Kick off the lookahead drafter so the next AI-personalize step
+  // gets a draft generated right away instead of waiting up to 30 min
+  // for the next cron tick. Fire-and-forget; errors logged.
+  if (!isComplete && nextStep) {
+    prepareUpcomingDrafts().catch(err => {
+      console.error('[sendApprovedDraft] post-send prepareUpcomingDrafts failed:', err.message);
+    });
+  }
+
   return { id: draft.id };
 }
 
@@ -550,15 +601,19 @@ async function sendApprovedDraft(enrollment, step, draft) {
  * Throttled by MAX_DRAFTS_PER_RUN per cron pass to avoid hammering the LLM
  * provider on big sequences.
  */
-async function prepareUpcomingDrafts() {
-  const lookaheadDays = parseInt(process.env.DRAFT_LOOKAHEAD_DAYS || '7', 10);
-  const maxPerRun    = parseInt(process.env.MAX_DRAFTS_PER_RUN   || '20', 10);
-  const horizon = new Date(Date.now() + lookaheadDays * 24 * 60 * 60 * 1000);
+async function prepareUpcomingDrafts({ lookaheadDays, maxPerRun } = {}) {
+  // Defaults from env vars; callers can override (e.g. an on-send
+  // trigger may want to draft regardless of how far out the next step
+  // is). When lookaheadDays is null/Infinity, all active enrollments
+  // with a nextStepDue are considered.
+  const days = lookaheadDays ?? parseInt(process.env.DRAFT_LOOKAHEAD_DAYS || '14', 10);
+  const cap  = maxPerRun    ?? parseInt(process.env.MAX_DRAFTS_PER_RUN   || '20', 10);
+  const horizon = Number.isFinite(days) ? new Date(Date.now() + days * 24 * 60 * 60 * 1000) : null;
 
   const enrollments = await prisma.sequenceEnrollment.findMany({
     where: {
       status: 'active',
-      nextStepDue: { not: null, lte: horizon },
+      nextStepDue: horizon ? { not: null, lte: horizon } : { not: null },
     },
     include: { sequence: { include: { steps: { orderBy: { order: 'asc' } } } } },
     orderBy: { nextStepDue: 'asc' }, // sooner sends drafted first
@@ -567,7 +622,7 @@ async function prepareUpcomingDrafts() {
   const result = { drafted: 0, skipped: 0, failed: 0, errors: [] };
 
   for (const enrollment of enrollments) {
-    if (result.drafted >= maxPerRun) break;
+    if (result.drafted >= cap) break;
 
     const steps = enrollment.sequence.steps;
     const nextStep = steps.find(s =>
@@ -717,7 +772,13 @@ async function sendStepEmail(enrollment, step) {
     }
   }
 
-  return recordStepSent(enrollment, step, externalMessageId);
+  const activity = await recordStepSent(enrollment, step, externalMessageId);
+  // Kick the lookahead drafter so the next AI-personalize step (if any)
+  // gets a draft immediately rather than waiting up to 30 min.
+  prepareUpcomingDrafts().catch(err => {
+    console.error('[sendStepEmail] post-send prepareUpcomingDrafts failed:', err.message);
+  });
+  return activity;
 }
 
 // SMTP error codes / messages that indicate a permanent (hard) bounce.
