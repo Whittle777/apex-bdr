@@ -52,6 +52,16 @@ router.post('/:id/enroll', async (req, res) => {
   }
   try {
     const enrollments = await enrollProspects(sequenceId, prospectIds.map(Number), req.userId);
+
+    // Kick off AI draft generation immediately so the user sees drafts in
+    // the Review Queue right away instead of waiting up to 30 min for the
+    // next pre-draft cron tick. Fire-and-forget — errors are logged but
+    // don't block the enroll response.
+    const { prepareUpcomingDrafts } = require('../services/sequenceMailer');
+    prepareUpcomingDrafts().catch(err => {
+      console.error('[enroll] post-enroll prepareUpcomingDrafts failed:', err.message);
+    });
+
     res.json(enrollments);
   } catch (err) {
     res.status(500).json({ message: err.message });

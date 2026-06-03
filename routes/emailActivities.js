@@ -100,6 +100,22 @@ router.patch('/enrollment/:enrollmentId/cancel', async (req, res) => {
  * Reschedule a scheduled email — updates nextStepDue.
  * Body: { scheduledFor: ISO date string }
  */
+// POST /email-activities/run-now
+// Force-run the lookahead drafter and the send pass immediately, instead of
+// waiting for the next cron tick. Useful for testing and for unsticking a
+// just-enrolled prospect whose draft hasn't materialised yet.
+router.post('/run-now', async (req, res) => {
+  try {
+    const { prepareUpcomingDrafts, runDueSequenceEmails } = require('../services/sequenceMailer');
+    const draftsResult = await prepareUpcomingDrafts();
+    const sendResult   = await runDueSequenceEmails();
+    res.json({ ok: true, drafts: draftsResult, send: sendResult });
+  } catch (err) {
+    console.error('[run-now]', err);
+    res.status(500).json({ message: err.message });
+  }
+});
+
 router.patch('/enrollment/:enrollmentId/reschedule', async (req, res) => {
   const { scheduledFor } = req.body;
   if (!scheduledFor) return res.status(400).json({ message: 'scheduledFor required' });
@@ -108,6 +124,22 @@ router.patch('/enrollment/:enrollmentId/reschedule', async (req, res) => {
       where: { id: parseInt(req.params.enrollmentId) },
       data: { status: 'active', nextStepDue: new Date(scheduledFor), pausedAt: null, pausedReason: null },
     });
+
+    // Update the scheduledFor on any in-flight draft so the send pass
+    // honours the new time. If no draft exists yet, kick off the
+    // lookahead pass so one gets generated for the new send time.
+    await prisma.emailActivity.updateMany({
+      where: {
+        enrollmentId: enrollment.id,
+        status: { in: ['draft_pending', 'approved'] },
+      },
+      data: { scheduledFor: new Date(scheduledFor) },
+    });
+    const { prepareUpcomingDrafts } = require('../services/sequenceMailer');
+    prepareUpcomingDrafts().catch(err => {
+      console.error('[reschedule] prepareUpcomingDrafts failed:', err.message);
+    });
+
     res.json(enrollment);
   } catch (err) {
     res.status(500).json({ message: err.message });
