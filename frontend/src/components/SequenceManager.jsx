@@ -1205,7 +1205,78 @@ const SequenceManager = () => {
                             </div>
                             <div>
                               <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Body Template</label>
-                              <textarea value={stepForm.body} onChange={e => setStepForm({...stepForm, body: e.target.value})} placeholder={"Hi {{firstName}},\n\n"} style={{ width: '100%', marginTop: 4, minHeight: 120, resize: 'vertical' }} />
+                              <div style={{ marginTop: 4 }}>
+                                <RichTextEditor
+                                  value={stepForm.body}
+                                  resetKey={stepForm.id || 'new'}
+                                  onChange={v => setStepForm({ ...stepForm, body: v })}
+                                  placeholder={"Hi {{firstName}},\n\nUse the toolbar to format. Paste from Word / Outlook / Docs to keep bold, links, lists, etc."}
+                                  style={{ minHeight: 160 }}
+                                />
+                              </div>
+                            </div>
+
+                            {/* Reply-in-thread toggle */}
+                            <div style={{ marginTop: 4, padding: '10px 12px', background: 'var(--bg-glass)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!stepForm.replyToPrevious}
+                                  onChange={e => setStepForm({ ...stepForm, replyToPrevious: e.target.checked })}
+                                />
+                                ↪ Send as reply to the previous email in this sequence
+                              </label>
+                              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 6, lineHeight: 1.4 }}>
+                                When on, this step sends in the same Outlook thread as the most recent sent step (subject becomes "Re: …" automatically). Best for short follow-ups / bumps. The AI personalizer adapts to write a concise follow-up note instead of repeating the original pitch.
+                              </div>
+                            </div>
+
+                            {/* AI personalization toggle + fields */}
+                            <div style={{ marginTop: 4, padding: '10px 12px', background: 'var(--bg-glass)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)' }}>
+                              <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: '0.82rem', fontWeight: 600, color: 'var(--text-primary)', cursor: 'pointer' }}>
+                                <input
+                                  type="checkbox"
+                                  checked={!!stepForm.aiPersonalize}
+                                  onChange={e => setStepForm({ ...stepForm, aiPersonalize: e.target.checked })}
+                                />
+                                ✨ AI-personalize each email using prospect &amp; account research (drafts go to review queue)
+                              </label>
+                              {stepForm.aiPersonalize && (
+                                <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                                  <div>
+                                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Intent (one line)</label>
+                                    <input
+                                      value={stepForm.aiPurpose || ''}
+                                      onChange={e => setStepForm({ ...stepForm, aiPurpose: e.target.value })}
+                                      placeholder="e.g. Cold open for a Mining CFO. Personalize opener around any recent strategic shift or stated priority."
+                                      style={{ width: '100%', marginTop: 4 }}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Voice / Style / Constraints</label>
+                                    <textarea
+                                      value={stepForm.aiInstructions || ''}
+                                      onChange={e => setStepForm({ ...stepForm, aiInstructions: e.target.value })}
+                                      placeholder="Tone, length, and rules. e.g. Direct, peer-to-peer. Match the template's length — do not summarize the pitch. Bridge sentence after opener must mention the prospect's stated priority."
+                                      style={{ width: '100%', marginTop: 4, minHeight: 80, resize: 'vertical' }}
+                                    />
+                                  </div>
+                                  <div>
+                                    <label style={{ fontSize: '0.75rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Model override (optional)</label>
+                                    <input
+                                      value={stepForm.aiModel || ''}
+                                      onChange={e => setStepForm({ ...stepForm, aiModel: e.target.value })}
+                                      placeholder="default: gemini-2.5-pro · alternatives: gemini-2.5-flash · claude-opus-4-7 · claude-sonnet-4-6"
+                                      style={{ width: '100%', marginTop: 4, fontFamily: 'monospace', fontSize: '0.78rem' }}
+                                    />
+                                  </div>
+                                  <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.4 }}>
+                                    The AI <strong>personalizes the opener</strong> against your body template — it does NOT rewrite the pitch. Product names, customer name-drops, benefits, and the CTA from your template are preserved. Only the opening hook (and one bridge sentence) get re-written per prospect.
+                                    <br/>
+                                    Drafts queue in the <a href="/hitl" style={{ color: 'var(--accent-secondary)' }}>AI Review Queue</a> up to 7 days before send time so you can edit, regenerate, or skip before approval.
+                                  </div>
+                                </div>
+                              )}
                             </div>
                           </>
                         ) : (
