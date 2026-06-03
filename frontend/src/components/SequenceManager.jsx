@@ -4,6 +4,7 @@ import { useToast } from './Toast';
 import { useIntegrations } from '../contexts/IntegrationContext';
 import { SetupTooltipBlock } from './SetupTooltip';
 import { STEP_TYPE_CONFIG, ENROLLMENT_STATUS_STYLES } from '../constants';
+import RichTextEditor from './RichTextEditor';
 
 // Simulates per-step performance stats using the step's id as a deterministic seed.
 // In a real implementation these would come from the email tracking / activity API.
@@ -963,7 +964,15 @@ const SequenceManager = () => {
                                   </div>
                                   <div>
                                     <label style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)' }}>Body Template</label>
-                                    <textarea value={stepForm.body} onChange={e => setStepForm({...stepForm, body: e.target.value})} placeholder={"Hi {{firstName}},\n\n"} style={{ width: '100%', marginTop: 4, minHeight: 120, resize: 'vertical' }} />
+                                    <div style={{ marginTop: 4 }}>
+                                      <RichTextEditor
+                                        value={stepForm.body}
+                                        resetKey={stepForm.id || 'new'}
+                                        onChange={v => setStepForm({ ...stepForm, body: v })}
+                                        placeholder={"Hi {{firstName}},\n\nUse the toolbar to format. Paste from Word / Outlook / Docs to keep bold, links, lists, etc."}
+                                        style={{ minHeight: 160 }}
+                                      />
+                                    </div>
                                   </div>
 
                                   {/* Reply-in-thread toggle */}
