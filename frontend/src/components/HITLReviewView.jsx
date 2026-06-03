@@ -277,10 +277,12 @@ const HITLReviewView = () => {
   }, [selectedId, filteredQueue, selected, isEditing]);
 
   return (
-    <div style={{ display: 'flex', height: 'calc(100vh - 48px)', gap: 0, backgroundColor: 'var(--bg-primary)' }}>
+    // Email review is the primary surface (center / left, fills the screen).
+    // Queue list sits on the right as a compact sidebar.
+    <div style={{ display: 'flex', flexDirection: 'row-reverse', height: 'calc(100vh - 48px)', gap: 0, backgroundColor: 'var(--bg-primary)' }}>
 
-      {/* LEFT RAIL — Review Queue */}
-      <div style={{ width: 320, borderRight: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+      {/* RIGHT RAIL — Review Queue */}
+      <div style={{ width: 280, borderLeft: '1px solid var(--border-color)', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
         <div style={{ padding: '20px 16px', borderBottom: '1px solid var(--border-color)' }}>
           {/* Show labs banner only when there are no real drafts */}
           {!queue.some(i => i.__isDraft) && (
@@ -378,67 +380,78 @@ const HITLReviewView = () => {
         )}
       </div>
 
-      {/* CENTER PANE — Contextual Record */}
+      {/* MAIN PANE — Email Review (primary surface) */}
       {selected ? (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', borderRight: '1px solid var(--border-color)', overflow: 'hidden' }}>
-          <div style={{ padding: '20px 24px', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--bg-secondary)' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-              <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '1.1rem' }}>
-                {selected.prospect.firstName[0]}{selected.prospect.lastName[0]}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <div style={{ padding: '14px 24px', borderBottom: '1px solid var(--border-color)', backgroundColor: 'var(--bg-secondary)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+              <div style={{ width: 36, height: 36, borderRadius: '50%', background: 'linear-gradient(135deg, var(--accent-primary), var(--accent-secondary))', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 700, fontSize: '0.95rem', flexShrink: 0 }}>
+                {(selected.prospect.firstName?.[0] || '?')}{(selected.prospect.lastName?.[0] || '')}
               </div>
-              <div>
-                <h3 style={{ margin: 0 }}>{selected.prospect.firstName} {selected.prospect.lastName}</h3>
-                <div style={{ color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                  {selected.prospect.title} · {selected.prospect.companyName || selected.prospect.company} · {selected.prospect.email}
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <h3 style={{ margin: 0, fontSize: '1.02rem' }}>{selected.prospect.firstName} {selected.prospect.lastName}</h3>
+                <div style={{ color: 'var(--text-secondary)', fontSize: '0.82rem', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {[selected.prospect.title, selected.prospect.companyName || selected.prospect.company, selected.prospect.email]
+                    .filter(v => v && v !== '—').join(' · ')}
                 </div>
               </div>
-              <div style={{ marginLeft: 'auto', textAlign: 'right' }}>
-                <div style={{ fontSize: '1.2rem', fontWeight: 700, color: 'var(--accent-primary)' }}>{selected.pipelineValue}</div>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>Pipeline Value</div>
-              </div>
+              {selected.scheduledFor && (
+                <div style={{ textAlign: 'right', fontSize: '0.74rem' }}>
+                  <div style={{ color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600, fontSize: '0.66rem' }}>Scheduled</div>
+                  <div style={{ color: 'var(--text-secondary)' }}>{new Date(selected.scheduledFor).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</div>
+                </div>
+              )}
             </div>
           </div>
 
-          <div style={{ flex: 1, overflowY: 'auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 20 }}>
-            {/* Engagement Context */}
-            <div style={{ backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: 16 }}>
-              <h4 style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12 }}>Omnichannel Context</h4>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12 }}>
+          <div style={{ flex: 1, overflowY: 'auto', padding: 24, display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Engagement Context — only when there's real signal */}
+            {(selected.sourceData?.webVisits > 0 || selected.sourceData?.calls > 0 || (selected.sourceData?.recentEmail && selected.sourceData.recentEmail !== '—')) && (
+            <div style={{ backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: 14 }}>
+              <h4 style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10 }}>Recent Engagement</h4>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
                 {[
-                  { label: 'Web Visits', value: selected.sourceData.webVisits, icon: '🌐' },
-                  { label: 'Calls Made', value: selected.sourceData.calls, icon: '📞' },
-                  { label: 'Recent Email', value: selected.sourceData.recentEmail, icon: '✉️', wide: true },
-                ].map(stat => (
-                  <div key={stat.label} style={{ gridColumn: stat.wide ? 'span 3' : 'span 1', padding: '10px 14px', backgroundColor: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', gap: 10 }}>
-                    <span style={{ fontSize: '1.1rem' }}>{stat.icon}</span>
+                  selected.sourceData.webVisits > 0     && { label: 'Web Visits',   value: selected.sourceData.webVisits, icon: '🌐' },
+                  selected.sourceData.calls > 0         && { label: 'Calls Made',   value: selected.sourceData.calls,     icon: '📞' },
+                  selected.sourceData.recentEmail && selected.sourceData.recentEmail !== '—' && { label: 'Recent Email', value: selected.sourceData.recentEmail, icon: '✉️', wide: true },
+                ].filter(Boolean).map(stat => (
+                  <div key={stat.label} style={{ gridColumn: stat.wide ? 'span 3' : 'span 1', padding: '8px 12px', backgroundColor: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)', display: 'flex', alignItems: 'center', gap: 10 }}>
+                    <span style={{ fontSize: '1.05rem' }}>{stat.icon}</span>
                     <div>
-                      <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>{stat.label}</div>
-                      <div style={{ fontSize: '0.9rem', fontWeight: 600 }}>{stat.value}</div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)' }}>{stat.label}</div>
+                      <div style={{ fontSize: '0.88rem', fontWeight: 600 }}>{stat.value}</div>
                     </div>
                   </div>
                 ))}
               </div>
-              <div style={{ marginTop: 12, padding: '10px 14px', backgroundColor: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)' }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: 4 }}>Tech Stack</div>
-                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                  {selected.sourceData.techStack.split(', ').map(t => (
-                    <span key={t} style={{ fontSize: '0.75rem', padding: '2px 8px', backgroundColor: 'var(--accent-dim)', color: 'var(--accent-primary)', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-accent)' }}>{t}</span>
+              {selected.sourceData.techStack && selected.sourceData.techStack !== '—' && (
+                <div style={{ marginTop: 12, padding: '10px 14px', backgroundColor: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)' }}>
+                  <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: 4 }}>Tech Stack</div>
+                  <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                    {selected.sourceData.techStack.split(', ').map(t => (
+                      <span key={t} style={{ fontSize: '0.75rem', padding: '2px 8px', backgroundColor: 'var(--accent-dim)', color: 'var(--accent-primary)', borderRadius: 'var(--radius-full)', border: '1px solid var(--border-accent)' }}>{t}</span>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            )}
+
+            {/* AI Reasoning Chain — collapsible, off by default to keep the email front-and-centre */}
+            {selected.__isDraft && selected.reasoning && selected.reasoning.some(r => r && r.trim()) && (
+              <details style={{ backgroundColor: 'var(--bg-code)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '8px 14px' }}>
+                <summary style={{ fontSize: '0.74rem', color: 'var(--status-warning)', textTransform: 'uppercase', letterSpacing: '0.08em', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span>🤖</span> AI reasoning
+                </summary>
+                <div style={{ marginTop: 8 }}>
+                  {selected.reasoning.filter(r => r && r.trim()).map((step, i) => (
+                    <div key={i} style={{ display: 'flex', gap: 10, marginBottom: 6, fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+                      <span>▶</span><span>{step}</span>
+                    </div>
                   ))}
                 </div>
-              </div>
-            </div>
-
-            {/* AI Reasoning Chain */}
-            <div style={{ backgroundColor: 'var(--bg-code)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: 16 }}>
-              <h4 style={{ fontSize: '0.8rem', color: 'var(--status-warning)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span>🤖</span> AI Reasoning Chain
-              </h4>
-              {selected.reasoning.map((step, i) => (
-                <div key={i} style={{ display: 'flex', gap: 10, marginBottom: 8, fontFamily: 'monospace', fontSize: '0.82rem', color: i === selected.reasoning.length - 1 ? 'var(--status-warning)' : '#94a3b8', opacity: i === selected.reasoning.length - 1 ? 1 : 0.75 }}>
-                  <span>▶</span><span>{step}</span>
-                </div>
-              ))}
-            </div>
+              </details>
+            )}
           </div>
         </div>
       ) : (

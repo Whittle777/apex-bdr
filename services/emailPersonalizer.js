@@ -29,8 +29,9 @@ pitch.
 
 Output strict JSON: { "subject": string, "body": string, "reasoning": string }
   - "subject" must be under 60 chars
-  - "body" should be plain text with \\n for line breaks; preserve any
-    bullet lists from the template using "- " prefixes
+  - "body" is HTML when the template contains HTML tags (use <br> for
+    line breaks, <p> for paragraphs, preserve template formatting tags
+    verbatim). Otherwise the body is plain text with \\n line breaks.
   - "reasoning" is 1-2 sentences explaining what context you leveraged
     and which parts of the template you kept verbatim`;
 
@@ -186,6 +187,14 @@ PRESERVE from the reference body template (verbatim or near-verbatim):
   whether they are bare https://... URLs or markdown [text](url) form.
   If you add a new link of your own (e.g. a calendar booking URL or a
   case study), write it in markdown form: [short label](https://...).
+- HTML FORMATTING TAGS from the template — preserve every <a href="...">,
+  <strong>, <b>, <em>, <i>, <u>, <ul>, <ol>, <li>, <br>, <p>, <span>
+  tag exactly as it appears. The template body is HTML; the output body
+  should be HTML too. Do not strip tags, do not convert them to
+  markdown, do not paraphrase them away. If you add new emphasis of your
+  own, use the same HTML tags (e.g. wrap a key phrase in <strong>...
+  </strong>). For new links you insert, use <a href="https://..."
+  target="_blank" rel="noopener noreferrer">label</a>.
 
 PERSONALIZE:
 - The opener: replace the template's first 1-2 sentences with a hook
