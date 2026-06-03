@@ -12,6 +12,11 @@
  * The full prompt is returned so HITL can display & re-edit it for regeneration.
  */
 const { generate } = require('./aiProvider');
+const prisma = require('./database');
+
+const HISTORY_EMAIL_LIMIT = 8;   // most recent N outbound emails to include
+const HISTORY_REPLY_LIMIT = 5;   // most recent N inbound replies to include
+const HISTORY_BODY_CAP    = 600; // chars per body snippet — keeps prompt size bounded
 
 const SYSTEM_PROMPT = `You are an expert B2B sales BDR personalizing existing outbound email
 templates. Your job is to adapt a template's opening hook to a specific
@@ -65,6 +70,79 @@ function buildProspectSection(prospect) {
   ]);
 }
 
+/**
+ * Pull the prospect's outbound + inbound conversation history so the LLM
+ * can avoid repeating prior content and reference past touchpoints
+ * naturally. Capped to keep prompt size reasonable.
+ */
+async function fetchProspectHistory(prospectId) {
+  if (!prospectId) return { emails: [], replies: [] };
+  const [emails, replies] = await Promise.all([
+    prisma.emailActivity.findMany({
+      where: {
+        prospectId,
+        status: { in: ['sent', 'opened'] },
+      },
+      orderBy: { sentAt: 'desc' },
+      take: HISTORY_EMAIL_LIMIT,
+      select: {
+        id: true,
+        subject: true,
+        sentAt: true,
+        status: true,
+        openedAt: true,
+        draftBody: true, // populated for AI-personalized sends
+        sequenceStep: { select: { order: true } },
+      },
+    }).catch(() => []),
+    prisma.replyActivity.findMany({
+      where: { prospectId },
+      orderBy: { receivedAt: 'desc' },
+      take: HISTORY_REPLY_LIMIT,
+      select: {
+        id: true,
+        subject: true,
+        bodySnippet: true,
+        classification: true,
+        receivedAt: true,
+      },
+    }).catch(() => []),
+  ]);
+  return { emails, replies };
+}
+
+function buildHistorySection({ emails, replies }) {
+  if ((!emails || emails.length === 0) && (!replies || replies.length === 0)) {
+    return '(no prior outreach to this prospect — this is a fresh contact)';
+  }
+  const lines = [];
+  if (emails && emails.length > 0) {
+    lines.push('Past outbound emails to this prospect (most recent first):');
+    for (const e of emails) {
+      const when = e.sentAt ? new Date(e.sentAt).toISOString().slice(0, 10) : 'unsent';
+      const opened = e.status === 'opened' || e.openedAt ? ' [OPENED]' : '';
+      const stepLabel = e.sequenceStep?.order ? ` (step ${e.sequenceStep.order})` : '';
+      lines.push(`- ${when}${opened}${stepLabel} — Subject: "${e.subject || '(no subject)'}"`);
+      if (e.draftBody) {
+        const snippet = e.draftBody.slice(0, HISTORY_BODY_CAP);
+        const ellipsis = e.draftBody.length > HISTORY_BODY_CAP ? '…' : '';
+        lines.push(`  Body excerpt: ${snippet.replace(/\n+/g, ' ')}${ellipsis}`);
+      }
+    }
+  }
+  if (replies && replies.length > 0) {
+    lines.push('');
+    lines.push('Replies received from this prospect (most recent first):');
+    for (const r of replies) {
+      const when = r.receivedAt ? new Date(r.receivedAt).toISOString().slice(0, 10) : '?';
+      const cls  = r.classification ? ` [${r.classification}]` : '';
+      lines.push(`- ${when}${cls} — Subject: "${r.subject || '(no subject)'}"`);
+      if (r.bodySnippet) lines.push(`  Excerpt: ${r.bodySnippet.slice(0, HISTORY_BODY_CAP).replace(/\n+/g, ' ')}`);
+    }
+  }
+  return lines.join('\n');
+}
+
 function buildStepSection(step) {
   return compactList([
     `Step Order: ${step.order} (delay ${step.delayDays} days)`,
@@ -75,11 +153,12 @@ function buildStepSection(step) {
   ]);
 }
 
-function buildPrompt({ step, prospect, account, customInstructions }) {
+function buildPrompt({ step, prospect, account, customInstructions, history }) {
   const sections = [
     `=== STEP BRIEF ===\n${buildStepSection(step)}`,
     `=== PROSPECT ===\n${buildProspectSection(prospect)}`,
     `=== ACCOUNT RESEARCH ===\n${buildAccountSection(account)}`,
+    `=== PRIOR OUTREACH (avoid repeating these openers/insights; reference naturally if relevant) ===\n${buildHistorySection(history || { emails: [], replies: [] })}`,
   ];
   if (customInstructions && customInstructions.trim()) {
     sections.push(`=== ADDITIONAL INSTRUCTIONS (override) ===\n${customInstructions}`);
@@ -130,6 +209,16 @@ If both research blocks are empty, write a generic opener based on the
 prospect's title + company, keep everything else from the template
 verbatim, and note this in the reasoning field.
 
+USE THE PRIOR OUTREACH SECTION:
+- Do NOT reuse the opener angle or hook from any previous email in
+  the list. If the last email led with "Noticed you just shipped X",
+  pick a different angle (a different priority, a different signal).
+- If a reply was received, reference it briefly and naturally (e.g.
+  "appreciated your note on X" or "following up on what you said
+  about Y"). Never re-pitch as if no reply happened.
+- For follow-up steps (step order > 1), acknowledge that this is a
+  continuation, not a first-touch — adjust the opener accordingly.
+
 Output JSON only.`
   );
   return sections.join('\n\n');
@@ -165,7 +254,8 @@ function parseModelOutput(text) {
  */
 async function personalize({ step, prospect, account, customInstructions }) {
   const acct = account || prospect.account || null;
-  const userPrompt = buildPrompt({ step, prospect, account: acct, customInstructions });
+  const history = await fetchProspectHistory(prospect?.id);
+  const userPrompt = buildPrompt({ step, prospect, account: acct, customInstructions, history });
 
   const result = await generate({
     systemPrompt: SYSTEM_PROMPT,
