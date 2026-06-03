@@ -78,20 +78,40 @@ export default function RichTextEditor({
   style = {},
 }) {
   const ref = useRef(null);
+  // Tracks whether the user has typed in the editor since the last
+  // resetKey change. When false (fresh selection, no typing yet), we
+  // re-seed on every `value` change so the editor catches up if the
+  // parent populates `value` AFTER the resetKey effect ran (common
+  // pattern: parent sets a separate "edited body" state in its own
+  // useEffect, which fires one render later than the resetKey here).
+  const userTouchedRef = useRef(false);
 
-  // Seed innerHTML when resetKey changes — keeps cursor stable while
-  // typing because we DON'T re-set innerHTML on every value update.
-  // Plain-text seeds get \n → <br/> mapping so multi-line drafts (from
-  // the LLM, which outputs plain text) display correctly.
-  useEffect(() => {
+  const seedFromValue = () => {
     if (!ref.current) return;
     const seed = looksLikeHtml(value)
       ? (value || '')
       : (value || '').replace(/\n/g, '<br/>');
     if (ref.current.innerHTML !== seed) ref.current.innerHTML = seed;
     decorateExistingLinks(ref.current);
+  };
+
+  // Reset-on-key effect: clear the touched flag and seed from current
+  // value when a new draft is selected.
+  useEffect(() => {
+    userTouchedRef.current = false;
+    seedFromValue();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey]);
+
+  // Catch-up effect: if value changes before the user types (e.g.
+  // parent populated the body one render after resetKey changed),
+  // re-seed. Once the user has typed, leave the editor alone so we
+  // don't clobber their work or jump the cursor.
+  useEffect(() => {
+    if (userTouchedRef.current) return;
+    seedFromValue();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
 
   // Ensure links that were already in the seed value also get target/rel/title.
   const decorateExistingLinks = (root) => {
@@ -111,6 +131,7 @@ export default function RichTextEditor({
     e.preventDefault();
     const clean = sanitizePastedHtml(html);
     document.execCommand('insertHTML', false, clean);
+    userTouchedRef.current = true;
     onChange(ref.current?.innerHTML || '');
   };
 
@@ -129,6 +150,7 @@ export default function RichTextEditor({
     // execCommand is deprecated but still the simplest cross-browser
     // path for bold/italic/lists/links inside a contenteditable.
     document.execCommand(command, false, arg);
+    userTouchedRef.current = true;
     onChange(ref.current?.innerHTML || '');
   };
 
@@ -192,7 +214,10 @@ export default function RichTextEditor({
         ref={ref}
         contentEditable
         suppressContentEditableWarning
-        onInput={() => onChange(ref.current?.innerHTML || '')}
+        onInput={() => {
+          userTouchedRef.current = true;
+          onChange(ref.current?.innerHTML || '');
+        }}
         onPaste={handlePaste}
         onClick={handleClick}
         data-placeholder={placeholder}
