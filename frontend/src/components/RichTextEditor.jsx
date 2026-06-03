@@ -4,6 +4,56 @@ const HTML_TAG_PATTERN = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i
 const looksLikeHtml = (s) => typeof s === 'string' && HTML_TAG_PATTERN.test(s);
 
 /**
+ * Tidy pasted HTML: strip Office / Google Docs noise, force every <a> to
+ * have target=_blank + rel, drop styling attributes that bloat the email.
+ * Returns clean HTML suitable for the editor and the outgoing message.
+ */
+function sanitizePastedHtml(html) {
+  if (!html) return '';
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html;
+
+  // Remove Office-specific containers and conditional comments.
+  tpl.content.querySelectorAll('o\\:p, w\\:sdt, w\\:sdtPr, style, meta, link, script').forEach(n => n.remove());
+
+  // Strip class attrs (Word adds MsoNormal etc.), inline mso-* and font
+  // declarations from Word.
+  tpl.content.querySelectorAll('*').forEach((el) => {
+    el.removeAttribute('class');
+    el.removeAttribute('lang');
+    const style = el.getAttribute('style');
+    if (style) {
+      const cleaned = style
+        .split(';')
+        .filter(s => !/^\s*(mso-|font-family|font-size|line-height|color)/i.test(s))
+        .join(';')
+        .trim();
+      if (cleaned) el.setAttribute('style', cleaned);
+      else el.removeAttribute('style');
+    }
+  });
+
+  // Ensure every anchor opens in a new tab with safe rel and a hover
+  // tooltip showing its target — and that the href is present + clickable.
+  tpl.content.querySelectorAll('a').forEach((a) => {
+    const href = a.getAttribute('href');
+    if (!href) {
+      // Office sometimes uses <a name="..."> bookmarks with no href —
+      // unwrap them so they don't look like clickable links.
+      const parent = a.parentNode;
+      while (a.firstChild) parent.insertBefore(a.firstChild, a);
+      parent.removeChild(a);
+      return;
+    }
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', 'noopener noreferrer');
+    a.setAttribute('title', href);
+  });
+
+  return tpl.innerHTML;
+}
+
+/**
  * Minimal contenteditable rich-text editor for email body editing.
  *
  * Preserves formatting on paste (bold, italic, lists, links, etc.)
@@ -39,8 +89,40 @@ export default function RichTextEditor({
       ? (value || '')
       : (value || '').replace(/\n/g, '<br/>');
     if (ref.current.innerHTML !== seed) ref.current.innerHTML = seed;
+    decorateExistingLinks(ref.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetKey]);
+
+  // Ensure links that were already in the seed value also get target/rel/title.
+  const decorateExistingLinks = (root) => {
+    if (!root) return;
+    root.querySelectorAll('a[href]').forEach((a) => {
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+      if (!a.getAttribute('title')) a.setAttribute('title', a.getAttribute('href'));
+    });
+  };
+
+  const handlePaste = (e) => {
+    const clipboard = e.clipboardData;
+    if (!clipboard) return;
+    const html = clipboard.getData('text/html');
+    if (!html) return; // let the browser handle plain-text paste normally
+    e.preventDefault();
+    const clean = sanitizePastedHtml(html);
+    document.execCommand('insertHTML', false, clean);
+    onChange(ref.current?.innerHTML || '');
+  };
+
+  const handleClick = (e) => {
+    // Cmd/Ctrl + click on a link opens it in a new tab. Regular click
+    // is left to contenteditable so the user can place the cursor.
+    const a = e.target.closest && e.target.closest('a[href]');
+    if (a && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      window.open(a.getAttribute('href'), '_blank', 'noopener,noreferrer');
+    }
+  };
 
   const cmd = (command, arg) => {
     ref.current?.focus();
@@ -60,6 +142,7 @@ export default function RichTextEditor({
     links.forEach((a) => {
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');
+      a.setAttribute('title', safe);
     });
     onChange(ref.current?.innerHTML || '');
   };
@@ -89,6 +172,7 @@ export default function RichTextEditor({
         display: 'flex', gap: 4, padding: '6px 8px',
         borderBottom: '1px solid var(--border-soft)',
         background: 'var(--bg-secondary)',
+        flexWrap: 'wrap',
       }}>
         <ToolBtn label="B" title="Bold (Cmd/Ctrl+B)"      onClick={() => cmd('bold')} />
         <ToolBtn label="I" title="Italic (Cmd/Ctrl+I)"    onClick={() => cmd('italic')} />
@@ -99,12 +183,18 @@ export default function RichTextEditor({
         <span style={{ width: 1, background: 'var(--border-soft)', margin: '0 4px' }} />
         <ToolBtn label="🔗"     title="Insert link"     onClick={insertLink} />
         <ToolBtn label="× Clear" title="Strip formatting from selection" onClick={() => cmd('removeFormat')} />
+        <span style={{ flex: 1 }} />
+        <span style={{ fontSize: '0.66rem', color: 'var(--text-muted)', alignSelf: 'center' }}>
+          Cmd/Ctrl+click a link to open it
+        </span>
       </div>
       <div
         ref={ref}
         contentEditable
         suppressContentEditableWarning
         onInput={() => onChange(ref.current?.innerHTML || '')}
+        onPaste={handlePaste}
+        onClick={handleClick}
         data-placeholder={placeholder}
         style={{
           minHeight: 160,
