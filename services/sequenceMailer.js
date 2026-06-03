@@ -41,7 +41,9 @@ async function getMicrosoftAccessToken(userId) {
     client_secret: process.env.MICROSOFT_CLIENT_SECRET,
     refresh_token: cred.refreshToken,
     grant_type:    'refresh_token',
-    scope:         'https://graph.microsoft.com/Mail.Send offline_access',
+    // Mail.Read is required to read back the Outlook-generated Message-ID
+    // from Sent Items after each send (for reply tracking).
+    scope:         'https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Read offline_access',
   });
   const res = await axios.post(
     'https://login.microsoftonline.com/common/oauth2/v2.0/token',
@@ -63,7 +65,11 @@ async function getMicrosoftAccessToken(userId) {
  * Returns a generated Message-ID for reply tracking.
  */
 async function sendViaGraph(accessToken, fromEmail, toEmail, subject, htmlBody) {
-  const messageId = `<${crypto.randomUUID()}@apex-bdr>`;
+  // NOTE: Microsoft Graph requires custom internetMessageHeaders names to
+  // start with "x-". Standard headers like Message-ID and List-Unsubscribe
+  // cause a 400. We omit them here and instead read Outlook's
+  // auto-generated Message-ID back from Sent Items below — that's what
+  // reply tracking (In-Reply-To matching) keys off of.
   try {
     await axios.post(
       'https://graph.microsoft.com/v1.0/me/sendMail',
@@ -72,21 +78,12 @@ async function sendViaGraph(accessToken, fromEmail, toEmail, subject, htmlBody) 
           subject,
           body: { contentType: 'HTML', content: htmlBody },
           toRecipients: [{ emailAddress: { address: toEmail } }],
-          internetMessageHeaders: [
-            { name: 'Message-ID',              value: messageId },
-            { name: 'List-Unsubscribe',        value: `<${process.env.APP_URL || 'http://localhost:3000'}/prospects/list-unsubscribe?email=${encodeURIComponent(toEmail)}>` },
-            { name: 'List-Unsubscribe-Post',   value: 'List-Unsubscribe=One-Click' },
-          ],
         },
         saveToSentItems: true,
       },
       { headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' } }
     );
-    return messageId;
   } catch (err) {
-    // axios swallows the actual Graph error detail into err.response.data.
-    // Surface it on the thrown message so it shows up in the UI's
-    // failureReason field instead of just "Request failed with status code X".
     const status = err.response?.status;
     const graphErr = err.response?.data?.error;
     const detail = graphErr?.message || graphErr?.code || JSON.stringify(err.response?.data || {}).slice(0, 200);
@@ -96,6 +93,32 @@ async function sendViaGraph(accessToken, fromEmail, toEmail, subject, htmlBody) 
     enriched.status = status;
     enriched.graphError = graphErr;
     throw enriched;
+  }
+
+  // Best-effort: fetch the just-sent message from Sent Items to capture
+  // Outlook's Message-ID so reply detection can match In-Reply-To later.
+  // Filter narrowly by subject + recipient + recency to avoid race
+  // conditions when multiple sends happen back-to-back.
+  try {
+    const sinceIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+    const escSubject = subject.replace(/'/g, "''");
+    const res = await axios.get(
+      `https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages` +
+      `?$top=5&$orderby=sentDateTime desc` +
+      `&$select=internetMessageId,subject,sentDateTime,toRecipients` +
+      `&$filter=sentDateTime ge ${sinceIso} and subject eq '${escSubject}'`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const candidates = res.data?.value || [];
+    const match = candidates.find(m =>
+      (m.toRecipients || []).some(r => r.emailAddress?.address?.toLowerCase() === toEmail.toLowerCase())
+    );
+    return match?.internetMessageId || null;
+  } catch (lookupErr) {
+    // Lookup failure is non-fatal — the email was sent. Reply tracking
+    // for this message just degrades.
+    console.warn(`[Graph] Sent ok but couldn't read back internetMessageId: ${lookupErr.message}`);
+    return null;
   }
 }
 
