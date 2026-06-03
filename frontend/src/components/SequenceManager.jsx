@@ -1086,9 +1086,19 @@ const SequenceManager = () => {
                               </div>
                             )}
                             {step.body && (
-                              <div style={{ backgroundColor: 'var(--bg-primary)', padding: '8px 10px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
-                                {step.body}
-                              </div>
+                              /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i.test(step.body) ? (
+                                // Rich-text bodies render as HTML so bold,
+                                // links, lists, etc. show as they will in the
+                                // actual email.
+                                <div
+                                  style={{ backgroundColor: 'var(--bg-primary)', padding: '8px 10px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.55 }}
+                                  dangerouslySetInnerHTML={{ __html: step.body }}
+                                />
+                              ) : (
+                                <div style={{ backgroundColor: 'var(--bg-primary)', padding: '8px 10px', borderRadius: 'var(--radius-sm)', fontSize: '0.82rem', whiteSpace: 'pre-wrap', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                                  {step.body}
+                                </div>
+                              )
                             )}
                             {['AUTO_EMAIL','MANUAL_EMAIL'].includes(step.stepType || 'AUTO_EMAIL') && (() => {
                               const stats = seedStats(step.id);
