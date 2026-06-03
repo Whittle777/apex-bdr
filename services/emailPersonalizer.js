@@ -182,6 +182,10 @@ PRESERVE from the reference body template (verbatim or near-verbatim):
 - Sender sign-off and signature tokens like {{sender.name}}
   (any {{...}} token in the template is a merge field resolved at send
   time — keep them exactly as-is, do not replace with invented names)
+- Any URLs and links present in the template — keep them verbatim
+  whether they are bare https://... URLs or markdown [text](url) form.
+  If you add a new link of your own (e.g. a calendar booking URL or a
+  case study), write it in markdown form: [short label](https://...).
 
 PERSONALIZE:
 - The opener: replace the template's first 1-2 sentences with a hook

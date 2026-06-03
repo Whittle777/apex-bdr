@@ -244,6 +244,45 @@ async function createSmtpTransport(userId) {
 /**
  * Interpolate {{firstName}}, {{lastName}}, {{company}}, {{email}} tokens in subject/body.
  */
+/**
+ * Convert user / AI body text into safe HTML with clickable links.
+ *
+ *  1. Preserve any existing <a href="...">...</a> tags by stashing them
+ *     behind sentinel placeholders so later regex passes don't touch them.
+ *  2. Convert markdown-style links [text](url) → <a href="url">text</a>.
+ *  3. Auto-link bare http(s) URLs to anchor tags.
+ *  4. Restore the original <a> tags.
+ *
+ * Inputs may be plain text or already partly HTML; output is safe to
+ * concatenate into an HTML body (after newlines are mapped to <br/>).
+ */
+function linkify(text) {
+  if (!text) return '';
+  const placeholders = [];
+  let out = text.replace(/<a\b[^>]*>[\s\S]*?<\/a>/gi, (m) => {
+    placeholders.push(m);
+    return ` LINK${placeholders.length - 1} `;
+  });
+
+  // Markdown [label](url) — url may contain query strings, anchors, etc.
+  out = out.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    (_, label, url) => `<a href="${url}" target="_blank" rel="noopener noreferrer">${label}</a>`
+  );
+
+  // Bare URLs — require whitespace or start-of-string preceding so we
+  // don't wrap URLs already embedded in attributes. Strips a trailing
+  // punctuation mark that's almost never part of the URL.
+  out = out.replace(
+    /(^|[\s(])(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)\]])/g,
+    (_, lead, url) => `${lead}<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`
+  );
+
+  // Restore <a> tags we stashed.
+  out = out.replace(/ LINK(\d+) /g, (_, i) => placeholders[Number(i)]);
+  return out;
+}
+
 function interpolate(template, prospect, sender = null) {
   if (!template) return '';
   let out = template
@@ -374,7 +413,9 @@ async function sendApprovedDraft(enrollment, step, draft) {
   const body    = interpolate(draft.draftBody || '', prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
-  const htmlBody = `${body.replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+  // linkify converts markdown [text](url) and bare URLs to anchor tags
+  // BEFORE \n → <br/> so newlines aren't mangled inside link targets.
+  const htmlBody = `${linkify(body).replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
 
   // If this step is configured to reply in-thread, look up the most
   // recent sent EmailActivity for this enrollment.
@@ -577,7 +618,9 @@ async function sendStepEmail(enrollment, step) {
   const body    = interpolate(step.body, prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
-  const htmlBody = `${body.replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+  // linkify converts markdown [text](url) and bare URLs to anchor tags
+  // BEFORE \n → <br/> so newlines aren't mangled inside link targets.
+  const htmlBody = `${linkify(body).replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
 
   const priorMessageId = step.replyToPrevious
     ? await findPriorInternetMessageId(enrollment.id)
