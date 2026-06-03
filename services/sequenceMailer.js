@@ -244,6 +244,15 @@ async function createSmtpTransport(userId) {
 /**
  * Interpolate {{firstName}}, {{lastName}}, {{company}}, {{email}} tokens in subject/body.
  */
+// Heuristic: the body is treated as already-HTML if it contains any of
+// the block / inline tags we know users / the editor will emit. Plain
+// text bodies (from the LLM, from old templates) fall through to the
+// newline-to-<br> path.
+const HTML_TAG_PATTERN = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i;
+function looksLikeHtml(s) {
+  return typeof s === 'string' && HTML_TAG_PATTERN.test(s);
+}
+
 /**
  * Convert user / AI body text into safe HTML with clickable links.
  *
@@ -413,9 +422,13 @@ async function sendApprovedDraft(enrollment, step, draft) {
   const body    = interpolate(draft.draftBody || '', prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
-  // linkify converts markdown [text](url) and bare URLs to anchor tags
-  // BEFORE \n → <br/> so newlines aren't mangled inside link targets.
-  const htmlBody = `${linkify(body).replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+  // linkify converts markdown [text](url) and bare URLs to anchor
+  // tags. If the body is already HTML (from the rich-text editor or
+  // pasted formatting), pass it through; otherwise map newlines to
+  // <br/> so plain-text bodies render correctly.
+  const linkedBody = linkify(body);
+  const bodyHtml = looksLikeHtml(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
+  const htmlBody = `${bodyHtml}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
 
   // If this step is configured to reply in-thread, look up the most
   // recent sent EmailActivity for this enrollment.
@@ -456,7 +469,9 @@ async function sendApprovedDraft(enrollment, step, draft) {
         to: prospect.email,
         subject: smtpSubject,
         html: htmlBody,
-        text: body,
+        text: looksLikeHtml(body)
+          ? body.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\n{3,}/g, '\n\n').trim()
+          : body,
         headers: smtpHeaders,
       });
       externalMessageId = info.messageId || null;
@@ -618,9 +633,13 @@ async function sendStepEmail(enrollment, step) {
   const body    = interpolate(step.body, prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
   const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
-  // linkify converts markdown [text](url) and bare URLs to anchor tags
-  // BEFORE \n → <br/> so newlines aren't mangled inside link targets.
-  const htmlBody = `${linkify(body).replace(/\n/g, '<br/>')}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+  // linkify converts markdown [text](url) and bare URLs to anchor
+  // tags. If the body is already HTML (from the rich-text editor or
+  // pasted formatting), pass it through; otherwise map newlines to
+  // <br/> so plain-text bodies render correctly.
+  const linkedBody = linkify(body);
+  const bodyHtml = looksLikeHtml(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
+  const htmlBody = `${bodyHtml}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
 
   const priorMessageId = step.replyToPrevious
     ? await findPriorInternetMessageId(enrollment.id)
@@ -659,7 +678,9 @@ async function sendStepEmail(enrollment, step) {
         to: prospect.email,
         subject: smtpSubject,
         html: htmlBody,
-        text: body,
+        text: looksLikeHtml(body)
+          ? body.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/\n{3,}/g, '\n\n').trim()
+          : body,
         headers: smtpHeaders,
       });
       externalMessageId = info.messageId || null;

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import { useToast } from './Toast';
+import RichTextEditor from './RichTextEditor';
 
 const CONFIDENCE_THRESHOLDS = {
   HIGH: 85,
@@ -500,10 +501,12 @@ const HITLReviewView = () => {
                       {showPrompt ? 'Hide prompt' : 'Show prompt'}
                     </button>
                   </div>
-                  <textarea
+                  <RichTextEditor
                     value={editedContent}
-                    onChange={e => { setEditedContent(e.target.value); setIsEditing(true); }}
-                    style={{ flex: 1, minHeight: 220, padding: 14, fontSize: '0.88rem', lineHeight: 1.6, backgroundColor: 'var(--bg-primary)', border: `1px solid ${isEditing ? 'var(--accent-primary)' : 'var(--border-color)'}`, borderRadius: 'var(--radius-md)', color: 'var(--text-primary)', resize: 'vertical', fontFamily: 'inherit' }}
+                    resetKey={selectedId}
+                    onChange={v => { setEditedContent(v); setIsEditing(true); }}
+                    placeholder="Write the email body…"
+                    style={{ minHeight: 220 }}
                   />
                 </div>
 
@@ -546,15 +549,26 @@ const HITLReviewView = () => {
                   </button>
                 </div>
                 {isEditing ? (
-                  <textarea
+                  <RichTextEditor
                     value={editedContent}
-                    onChange={(e) => setEditedContent(e.target.value)}
-                    style={{ flex: 1, minHeight: 280, padding: 14, fontSize: '0.88rem', lineHeight: 1.6, backgroundColor: 'var(--bg-primary)', border: '1px solid var(--accent-primary)', borderRadius: 'var(--radius-md)', color: 'var(--text-primary)', resize: 'none', fontFamily: 'inherit' }}
+                    resetKey={selectedId}
+                    onChange={setEditedContent}
+                    style={{ minHeight: 280 }}
                   />
                 ) : (
-                  <div style={{ flex: 1, padding: 14, fontSize: '0.88rem', lineHeight: 1.6, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', overflowY: 'auto', minHeight: 280 }}>
-                    {editedContent}
-                  </div>
+                  // Render HTML drafts (rich-text edits) directly; for plain
+                  // text drafts use whitespace: pre-wrap so newlines show.
+                  /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i.test(editedContent || '')
+                    ? (
+                      <div
+                        style={{ flex: 1, padding: 14, fontSize: '0.88rem', lineHeight: 1.6, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', color: 'var(--text-primary)', overflowY: 'auto', minHeight: 280 }}
+                        dangerouslySetInnerHTML={{ __html: editedContent }}
+                      />
+                    ) : (
+                      <div style={{ flex: 1, padding: 14, fontSize: '0.88rem', lineHeight: 1.6, backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', color: 'var(--text-primary)', whiteSpace: 'pre-wrap', overflowY: 'auto', minHeight: 280 }}>
+                        {editedContent}
+                      </div>
+                    )
                 )}
               </div>
             )}
