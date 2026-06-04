@@ -44,6 +44,11 @@ const SequenceManager = () => {
   const [emailStatusFilter, setEmailStatusFilter] = useState('all');
   const [selectedEmailKeys, setSelectedEmailKeys] = useState(new Set()); // "activity-{id}" or "enrollment-{id}"
   const [reschedulingKey, setReschedulingKey] = useState(null); // key being rescheduled
+  const [emailModalItem, setEmailModalItem] = useState(null); // item being viewed in the email modal
+  const [modalSubject, setModalSubject] = useState('');
+  const [modalBody, setModalBody] = useState('');
+  const [modalSaving, setModalSaving] = useState(false);
+  const [modalRegenerating, setModalRegenerating] = useState(false);
   const [rescheduleDate, setRescheduleDate] = useState('');
 
   // Calls tab
@@ -1299,7 +1304,7 @@ const SequenceManager = () => {
                 </div>
               </div>
             </div>
-          ) : (
+          ) : activeTab === 'prospects' ? (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
               {/* Enroll prospects */}
               {(() => {
@@ -1577,7 +1582,7 @@ const SequenceManager = () => {
                 )}
               </div>
             </div>
-            )}
+          ) : null}
 
             {/* ── EMAILS TAB ─────────────────────────────────────────────────── */}
             {activeTab === 'emails' && (() => {
@@ -1729,8 +1734,27 @@ const SequenceManager = () => {
                                 : (item.sentAt || item.createdAt);
                             const isRescheduling = reschedulingKey === key;
 
+                            // Activity items (drafts, sent, etc.) open the
+                            // modal for read/edit/regenerate. Scheduled
+                            // placeholders aren't clickable — there's no draft
+                            // body to show yet.
+                            const isClickable = item.type === 'activity' && ['draft_pending', 'approved', 'sent', 'opened', 'failed'].includes(item.status);
+                            const openModal = () => {
+                              setEmailModalItem(item);
+                              setModalSubject(item.subject || '');
+                              setModalBody(item.draftBody || '');
+                            };
                             return (
-                              <tr key={key} className={selectedEmailKeys.has(key) ? 'row-selected' : ''}>
+                              <tr
+                                key={key}
+                                className={selectedEmailKeys.has(key) ? 'row-selected' : ''}
+                                onClick={(e) => {
+                                  // ignore clicks on the checkbox or row-action buttons
+                                  if (e.target.closest('button, input, a')) return;
+                                  if (isClickable) openModal();
+                                }}
+                                style={isClickable ? { cursor: 'pointer' } : undefined}
+                              >
                                 <td style={{ paddingLeft: 16, width: 40 }}>
                                   <input
                                     type="checkbox"
@@ -2481,8 +2505,192 @@ const SequenceManager = () => {
 
         </div>
       )}
+
+      {/* Email detail modal — click any activity row in the Emails tab to open */}
+      {emailModalItem && (
+        <EmailDetailModal
+          item={emailModalItem}
+          subject={modalSubject}
+          body={modalBody}
+          onSubjectChange={setModalSubject}
+          onBodyChange={setModalBody}
+          saving={modalSaving}
+          regenerating={modalRegenerating}
+          onClose={() => setEmailModalItem(null)}
+          onSave={async () => {
+            setModalSaving(true);
+            try {
+              await api.patch(`/email-activities/${emailModalItem.id}/update-draft`, { subject: modalSubject, draftBody: modalBody });
+              toast('Draft updated', 'success', 2000);
+              fetchEmails(activeSequenceId);
+            } catch (err) {
+              toast(err.response?.data?.message || 'Save failed', 'error');
+            } finally {
+              setModalSaving(false);
+            }
+          }}
+          onRegenerate={async () => {
+            setModalRegenerating(true);
+            try {
+              const { data } = await api.post(`/email-activities/${emailModalItem.id}/regenerate`, {});
+              setModalSubject(data?.previewSubject || data?.subject || '');
+              setModalBody(data?.previewBody || data?.draftBody || '');
+              toast('Regenerated', 'success', 2000);
+              fetchEmails(activeSequenceId);
+            } catch (err) {
+              toast(err.response?.data?.message || 'Regenerate failed', 'error');
+            } finally {
+              setModalRegenerating(false);
+            }
+          }}
+          onApprove={async () => {
+            setModalSaving(true);
+            try {
+              await api.post(`/email-activities/${emailModalItem.id}/approve`, { editedSubject: modalSubject, editedBody: modalBody });
+              toast('Approved', 'success', 2000);
+              setEmailModalItem(null);
+              fetchEmails(activeSequenceId);
+            } catch (err) {
+              toast(err.response?.data?.message || 'Approve failed', 'error');
+            } finally {
+              setModalSaving(false);
+            }
+          }}
+          onReject={async () => {
+            try {
+              await api.post(`/email-activities/${emailModalItem.id}/reject`, { skipStep: false });
+              toast('Rejected — enrollment paused', 'warning', 2500);
+              setEmailModalItem(null);
+              fetchEmails(activeSequenceId);
+            } catch (err) {
+              toast(err.response?.data?.message || 'Reject failed', 'error');
+            }
+          }}
+        />
+      )}
     </div>
   );
 };
+
+// ─── Email detail modal ─────────────────────────────────────────────────────
+// Opens when the user clicks an activity row in the Emails tab. Lets them
+// view the rendered draft, edit subject + body (for draft_pending /
+// approved), regenerate via AI (draft_pending only), and approve / reject
+// (draft_pending only). Sent / failed / opened rows are read-only.
+function EmailDetailModal({ item, subject, body, onSubjectChange, onBodyChange, onClose, onSave, onRegenerate, onApprove, onReject, saving, regenerating }) {
+  const editable = item.status === 'draft_pending' || item.status === 'approved';
+  const canRegenerate = item.status === 'draft_pending';
+  const canApprove = item.status === 'draft_pending';
+  const isHtml = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i.test(body || '');
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 1000,
+        background: 'rgba(0,0,0,0.55)', backdropFilter: 'blur(4px)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(720px, calc(100vw - 40px))',
+          maxHeight: 'calc(100vh - 60px)',
+          background: 'var(--bg-secondary)',
+          border: '1px solid var(--border-color)',
+          borderRadius: 'var(--radius-md)',
+          display: 'flex', flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Header */}
+        <div style={{ padding: '14px 18px', borderBottom: '1px solid var(--border-color)', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 14 }}>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <h3 style={{ margin: 0, fontSize: '1rem' }}>{item.prospect?.firstName} {item.prospect?.lastName}</h3>
+            <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {[item.prospect?.title, item.prospect?.companyName, item.prospect?.email].filter(Boolean).join(' · ')}
+            </div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>
+              Status: <strong style={{ color: 'var(--text-secondary)' }}>{item.status}</strong>
+              {item.scheduledFor && <> · Scheduled: {new Date(item.scheduledFor).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</>}
+              {item.sentAt && <> · Sent: {new Date(item.sentAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</>}
+            </div>
+          </div>
+          <button onClick={onClose} className="ghost" style={{ padding: '4px 10px', fontSize: '0.85rem', color: 'var(--text-muted)' }}>✕</button>
+        </div>
+
+        {/* Body */}
+        <div style={{ flex: 1, overflowY: 'auto', padding: '14px 18px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <div>
+            <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Subject</label>
+            {editable ? (
+              <input
+                value={subject}
+                onChange={(e) => onSubjectChange(e.target.value)}
+                style={{ width: '100%', marginTop: 4, padding: '6px 10px', fontSize: '0.88rem' }}
+              />
+            ) : (
+              <div style={{ marginTop: 4, padding: '6px 10px', background: 'var(--bg-primary)', borderRadius: 'var(--radius-sm)', fontSize: '0.88rem' }}>{subject || '(no subject)'}</div>
+            )}
+          </div>
+
+          <div>
+            <label style={{ fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Body</label>
+            {editable ? (
+              <div style={{ marginTop: 4 }}>
+                <RichTextEditor
+                  value={body}
+                  resetKey={item.id}
+                  onChange={onBodyChange}
+                  placeholder="Edit the email body…"
+                  style={{ minHeight: 260 }}
+                />
+              </div>
+            ) : isHtml ? (
+              <div
+                style={{ marginTop: 4, padding: '12px 14px', background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', fontSize: '0.88rem', lineHeight: 1.55, maxHeight: 380, overflowY: 'auto' }}
+                dangerouslySetInnerHTML={{ __html: body || '' }}
+              />
+            ) : (
+              <div style={{ marginTop: 4, padding: '12px 14px', background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', fontSize: '0.88rem', lineHeight: 1.55, maxHeight: 380, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>{body || '(empty)'}</div>
+            )}
+          </div>
+
+          {item.failureReason && (
+            <div style={{ fontSize: '0.78rem', color: 'var(--status-danger)', padding: '8px 10px', background: 'var(--status-danger-dim)', border: '1px solid var(--status-danger-border)', borderRadius: 'var(--radius-sm)' }}>
+              Failure: {item.failureReason}
+            </div>
+          )}
+        </div>
+
+        {/* Footer actions */}
+        <div style={{ padding: '12px 18px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {canRegenerate && (
+            <button type="button" className="ghost" onClick={onRegenerate} disabled={regenerating || saving} style={{ fontSize: '0.85rem' }}>
+              {regenerating ? '⟳ Regenerating…' : '↻ Regenerate'}
+            </button>
+          )}
+          {editable && (
+            <button type="button" onClick={onSave} disabled={saving || regenerating} className="secondary" style={{ fontSize: '0.85rem' }}>
+              {saving ? 'Saving…' : '💾 Save edits'}
+            </button>
+          )}
+          {canApprove && (
+            <button type="button" onClick={onApprove} disabled={saving || regenerating} className="success-btn" style={{ fontSize: '0.85rem' }}>
+              ✓ Approve &amp; Send
+            </button>
+          )}
+          {canApprove && (
+            <button type="button" onClick={onReject} disabled={saving || regenerating} className="danger" style={{ fontSize: '0.85rem' }}>
+              ✗ Reject
+            </button>
+          )}
+          <button type="button" onClick={onClose} className="ghost" style={{ fontSize: '0.85rem' }}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default SequenceManager;

@@ -265,6 +265,32 @@ router.get('/drafts', async (req, res) => {
   }
 });
 
+// PATCH /email-activities/:id/update-draft — save edits to a draft_pending or
+// approved EmailActivity's subject/body without changing its status. Used
+// by the Emails-tab modal so the user can tweak content without going
+// through Approve / Regenerate.
+router.patch('/:id/update-draft', async (req, res) => {
+  const id = parseInt(req.params.id);
+  const { subject, draftBody } = req.body || {};
+  try {
+    const draft = await prisma.emailActivity.findUnique({ where: { id } });
+    if (!draft) return res.status(404).json({ message: 'EmailActivity not found' });
+    if (!['draft_pending', 'approved'].includes(draft.status)) {
+      return res.status(400).json({ message: `Cannot edit content for status "${draft.status}"` });
+    }
+    const updated = await prisma.emailActivity.update({
+      where: { id },
+      data: {
+        ...(subject   !== undefined && { subject }),
+        ...(draftBody !== undefined && { draftBody }),
+      },
+    });
+    res.json(updated);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // POST /email-activities/:id/approve — send the draft, advance enrollment
 router.post('/:id/approve', async (req, res) => {
   const id = parseInt(req.params.id);
