@@ -94,6 +94,38 @@ const HITLReviewView = () => {
   const [showPrompt, setShowPrompt] = useState(false);
   const [regenInput, setRegenInput] = useState('');
   const [regenerating, setRegenerating] = useState(false);
+  const [runningPass, setRunningPass] = useState(false);
+
+  // Manually trigger the same passes the cron runs every 15 / 30 min:
+  // (1) prepareUpcomingDrafts so any upcoming AI steps get drafted, and
+  // (2) runDueSequenceEmails which dispatches all approved drafts whose
+  //     scheduledFor has passed plus any plain-template sends due now.
+  const handleRunNow = async () => {
+    if (runningPass) return;
+    setRunningPass(true);
+    try {
+      const { data } = await api.post('/email-activities/run-now');
+      const sent     = data?.send?.sent    || 0;
+      const failed   = data?.send?.failed  || 0;
+      const drafted  = data?.drafts?.drafted || 0;
+      const errors   = [...(data?.send?.errors || []), ...(data?.drafts?.errors || [])];
+      const bits = [];
+      if (sent)    bits.push(`${sent} sent`);
+      if (drafted) bits.push(`${drafted} drafted`);
+      if (failed)  bits.push(`${failed} failed`);
+      const msg = bits.length ? bits.join(' · ') : 'No work to do — nothing currently due';
+      const tone = failed ? 'warning' : (sent || drafted ? 'success' : 'info');
+      toast(msg, tone, 4000);
+      if (errors.length) {
+        console.warn('[run-now] errors:', errors);
+      }
+      fetchQueue();
+    } catch (err) {
+      toast(err.response?.data?.message || 'Run failed', 'error');
+    } finally {
+      setRunningPass(false);
+    }
+  };
   const toast = useToast();
 
   const fetchQueue = async () => {
@@ -302,9 +334,20 @@ const HITLReviewView = () => {
               <strong>No live drafts.</strong> Enable <em>AI-personalize</em> on a sequence step and run the mailer to populate this queue with editable drafts.
             </div>
           )}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4, gap: 6 }}>
             <h3 style={{ margin: 0, fontSize: '1rem' }}>Review Queue</h3>
-            <button onClick={fetchQueue} title="Refresh" className="ghost" style={{ padding: '2px 8px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>↻</button>
+            <div style={{ display: 'flex', gap: 4 }}>
+              <button
+                onClick={handleRunNow}
+                disabled={runningPass}
+                title="Run send + draft passes now (instead of waiting up to 15 min for the next cron)"
+                className="ghost"
+                style={{ padding: '2px 8px', fontSize: '0.7rem', color: 'var(--accent-secondary)', fontWeight: 600 }}
+              >
+                {runningPass ? '⟳ Running…' : '▶ Run now'}
+              </button>
+              <button onClick={fetchQueue} title="Refresh queue" className="ghost" style={{ padding: '2px 8px', fontSize: '0.7rem', color: 'var(--text-muted)' }}>↻</button>
+            </div>
           </div>
           <p style={{ color: 'var(--text-secondary)', fontSize: '0.8rem', marginBottom: 16 }}>
             {loading ? 'Loading…' : `${queue.length} items · ${queue.filter(i => i.__isDraft).length} live draft${queue.filter(i => i.__isDraft).length === 1 ? '' : 's'}`}
