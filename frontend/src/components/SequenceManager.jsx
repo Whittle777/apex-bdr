@@ -1798,7 +1798,7 @@ const SequenceManager = () => {
                                     </div>
                                   ) : (
                                     <div style={{ display: 'flex', gap: 4 }}>
-                                      {item.status === 'scheduled' && (
+                                      {(item.status === 'scheduled' || item.status === 'approved' || item.status === 'draft_pending') && (
                                         <>
                                           <button
                                             className="ghost"
