@@ -479,20 +479,9 @@ const HITLReviewView = () => {
             </div>
           </div>
           <div style={{ flex: 1, overflowY: 'auto', padding: 20, display: 'flex', flexDirection: 'column', gap: 16 }}>
-            {/* AI Summary + model badge */}
-            <div style={{ backgroundColor: 'var(--bg-tertiary)', border: '1px solid var(--border-accent)', borderRadius: 'var(--radius-md)', padding: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-                <div style={{ fontSize: '0.75rem', color: 'var(--accent-primary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>AI Summary</div>
-                {selected.__isDraft && (selected.draftProvider || selected.draftModel) && (
-                  <span style={{ fontSize: '0.66rem', fontWeight: 700, padding: '2px 7px', borderRadius: 9999, background: 'var(--bg-primary)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)', fontFamily: 'monospace' }}>
-                    {selected.draftProvider}{selected.draftModel ? ` · ${selected.draftModel}` : ''}
-                  </span>
-                )}
-              </div>
-              <p style={{ fontSize: '0.88rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: 0 }}>{selected.aiSummary}</p>
-            </div>
-
-            {/* Draft Content — split subject + body when this is a real draft */}
+            {/* Draft Content — email subject + body, FIRST so the user lands
+                on the message itself; AI metadata and regenerate controls
+                live below the email. */}
             {selected.__isDraft ? (
               <>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -503,25 +492,61 @@ const HITLReviewView = () => {
                     style={{ padding: '8px 12px', fontSize: '0.9rem', backgroundColor: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)' }}
                   />
                 </div>
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0 }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                    <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Body</label>
-                    <button
-                      onClick={() => setShowPrompt(p => !p)}
-                      style={{ padding: '2px 8px', fontSize: '0.7rem', background: 'transparent', color: 'var(--text-muted)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}
-                      title="Show the exact prompt the model received"
-                    >
-                      {showPrompt ? 'Hide prompt' : 'Show prompt'}
-                    </button>
-                  </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Body</label>
                   <RichTextEditor
                     value={editedContent}
                     resetKey={selectedId}
                     onChange={v => { setEditedContent(v); setIsEditing(true); }}
                     placeholder="Write the email body…"
-                    style={{ minHeight: 220 }}
+                    style={{ minHeight: 320 }}
                   />
                 </div>
+
+                {/* AI metadata — collapsed by default, below the body */}
+                <details style={{ background: 'var(--bg-tertiary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: '8px 12px' }}>
+                  <summary style={{ cursor: 'pointer', fontSize: '0.74rem', color: 'var(--accent-primary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                    <span>AI summary &amp; model</span>
+                    {selected.draftProvider || selected.draftModel ? (
+                      <span style={{ fontSize: '0.66rem', fontWeight: 700, padding: '2px 7px', borderRadius: 9999, background: 'var(--bg-primary)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)', fontFamily: 'monospace' }}>
+                        {selected.draftProvider}{selected.draftModel ? ` · ${selected.draftModel}` : ''}
+                      </span>
+                    ) : null}
+                  </summary>
+                  <p style={{ fontSize: '0.86rem', color: 'var(--text-secondary)', lineHeight: 1.5, margin: '8px 0 0' }}>{selected.aiSummary}</p>
+                </details>
+
+                {/* Regenerate with custom instructions — below the body */}
+                <details style={{ background: 'var(--bg-tertiary)', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-md)', padding: '8px 12px' }}>
+                  <summary style={{ cursor: 'pointer', fontSize: '0.74rem', color: 'var(--text-secondary)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                    ↻ Adjust prompt &amp; regenerate
+                  </summary>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 10 }}>
+                    <textarea
+                      value={regenInput}
+                      onChange={e => setRegenInput(e.target.value)}
+                      placeholder="Extra instructions for the next run. Example: shorter, lead with the warm-intro path, drop the use-case mention."
+                      style={{ width: '100%', padding: '8px 10px', fontSize: '0.82rem', lineHeight: 1.45, background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', resize: 'vertical', minHeight: 50, fontFamily: 'inherit', boxSizing: 'border-box' }}
+                    />
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button
+                        onClick={handleRegenerate}
+                        disabled={regenerating}
+                        style={{ padding: '6px 14px', fontSize: '0.82rem' }}
+                      >
+                        {regenerating ? 'Regenerating…' : '↻ Regenerate'}
+                      </button>
+                      <button
+                        onClick={() => setShowPrompt(p => !p)}
+                        type="button"
+                        style={{ padding: '4px 10px', fontSize: '0.72rem', background: 'transparent', color: 'var(--text-muted)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)', cursor: 'pointer' }}
+                        title="Show the exact prompt the model received"
+                      >
+                        {showPrompt ? 'Hide prompt' : 'Show prompt'}
+                      </button>
+                    </div>
+                  </div>
+                </details>
 
                 {showPrompt && (
                   <div style={{ background: 'var(--bg-code)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', padding: 12, maxHeight: 240, overflowY: 'auto' }}>
@@ -529,24 +554,6 @@ const HITLReviewView = () => {
                     <pre style={{ margin: 0, fontSize: '0.74rem', lineHeight: 1.45, color: 'var(--text-secondary)', whiteSpace: 'pre-wrap', fontFamily: 'monospace' }}>{selected.draftPrompt}</pre>
                   </div>
                 )}
-
-                {/* Regenerate with custom instructions */}
-                <div style={{ background: 'var(--bg-tertiary)', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-md)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <label style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Adjust prompt &amp; regenerate</label>
-                  <textarea
-                    value={regenInput}
-                    onChange={e => setRegenInput(e.target.value)}
-                    placeholder="Extra instructions for the next run — e.g. 'shorter, lead with the warm-intro path, drop the use-case mention'"
-                    style={{ width: '100%', padding: '8px 10px', fontSize: '0.82rem', lineHeight: 1.45, background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)', resize: 'vertical', minHeight: 50, fontFamily: 'inherit', boxSizing: 'border-box' }}
-                  />
-                  <button
-                    onClick={handleRegenerate}
-                    disabled={regenerating}
-                    style={{ alignSelf: 'flex-start', padding: '6px 14px', fontSize: '0.82rem' }}
-                  >
-                    {regenerating ? 'Regenerating…' : '↻ Regenerate'}
-                  </button>
-                </div>
               </>
             ) : (
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
