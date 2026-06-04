@@ -109,6 +109,7 @@ const Prospects = () => {
   const [tagFilter, setTagFilter] = useState(null); // tag string | null
   const [companyFilter, setCompanyFilter] = useState(null); // company string | null
   const [selectedIds, setSelectedIds] = useState(new Set());
+  const [lastSelectedId, setLastSelectedId] = useState(null);
   const [selectedProspect, setSelectedProspect] = useState(null);
   const [form, setForm] = useState({ firstName: '', lastName: '', email: '', companyName: '' });
   const [sortField, setSortField] = useState('score'); // 'score' | 'name' | 'emails' | 'calls'
@@ -246,10 +247,31 @@ const Prospects = () => {
     else setSelectedIds(new Set());
   };
 
-  const handleSelectOne = (id) => {
+  const handleSelectOne = (id, e) => {
     const s = new Set(selectedIds);
+    // Shift-click: select the range of visible rows between the last
+    // clicked checkbox and this one. The current row's resulting state
+    // (selected vs not) matches the anchor's — so shift-click extends
+    // an existing selection rather than toggling each row mid-range.
+    if (e?.shiftKey && lastSelectedId != null && lastSelectedId !== id) {
+      const ids = filteredProspects.map(p => p.id);
+      const a = ids.indexOf(lastSelectedId);
+      const b = ids.indexOf(id);
+      if (a !== -1 && b !== -1) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        const select = s.has(lastSelectedId); // match anchor's state
+        for (let i = lo; i <= hi; i++) {
+          if (select) s.add(ids[i]);
+          else s.delete(ids[i]);
+        }
+        setSelectedIds(s);
+        setLastSelectedId(id);
+        return;
+      }
+    }
     s.has(id) ? s.delete(id) : s.add(id);
     setSelectedIds(s);
+    setLastSelectedId(id);
   };
 
   const handleBulkDelete = async () => {
@@ -728,7 +750,13 @@ const Prospects = () => {
                       style={{ cursor: 'pointer' }}
                     >
                       <td style={{ paddingLeft: 20, width: 44 }} onClick={(e) => e.stopPropagation()}>
-                        <input type="checkbox" checked={selectedIds.has(p.id)} onChange={() => handleSelectOne(p.id)} />
+                        <input
+                          type="checkbox"
+                          checked={selectedIds.has(p.id)}
+                          onClick={e => handleSelectOne(p.id, e)}
+                          onChange={() => { /* handled in onClick to access shiftKey */ }}
+                          title="Hold Shift while clicking to select a range"
+                        />
                       </td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>

@@ -476,6 +476,44 @@ const SequenceManager = () => {
     }
   };
 
+  // Bulk reschedule UI state — when set, the toolbar shows a datetime
+  // input + Apply button instead of plain buttons.
+  const [bulkRescheduleOpen, setBulkRescheduleOpen] = useState(false);
+  const [bulkRescheduleDate, setBulkRescheduleDate] = useState('');
+
+  const handleBulkEmailReschedule = async () => {
+    if (!bulkRescheduleDate) return;
+    const isoUtc = new Date(bulkRescheduleDate).toISOString();
+    const keys = Array.from(selectedEmailKeys);
+    const items = emailItems.filter(it => keys.includes(emailKey(it)));
+    // Only reschedule items that are actually pending (scheduled
+    // placeholders, draft_pending, or approved). The reschedule
+    // endpoint is keyed on enrollmentId and updates both the
+    // enrollment.nextStepDue and any in-flight EmailActivity row.
+    const reschedulable = items.filter(it =>
+      it.status === 'scheduled' || it.status === 'draft_pending' || it.status === 'approved'
+    );
+    if (reschedulable.length === 0) {
+      toast('No reschedulable emails in selection', 'warning');
+      return;
+    }
+    try {
+      // Dedupe by enrollment so we don't double-PATCH the same
+      // enrollment when multiple selected rows share one.
+      const enrollmentIds = [...new Set(reschedulable.map(it => it.enrollmentId).filter(Boolean))];
+      await Promise.all(enrollmentIds.map(id =>
+        api.patch(`/email-activities/enrollment/${id}/reschedule`, { scheduledFor: isoUtc })
+      ));
+      toast(`${reschedulable.length} email${reschedulable.length !== 1 ? 's' : ''} rescheduled`, 'success');
+      setSelectedEmailKeys(new Set());
+      setBulkRescheduleOpen(false);
+      setBulkRescheduleDate('');
+      fetchEmails(activeSequenceId);
+    } catch (err) {
+      toast(err.response?.data?.message || 'Bulk reschedule failed', 'error');
+    }
+  };
+
   // ── Call handlers ──────────────────────────────────────────────────────────
   const callKey = (item) => item.type === 'planned' ? `enrollment-${item.enrollmentId}` : `activity-${item.id}`;
 
@@ -1667,12 +1705,53 @@ const SequenceManager = () => {
                   </div>
 
                   {/* Bulk action bar */}
-                  {selectedEmailKeys.size > 0 && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'var(--accent-dim)', border: '1px solid var(--border-accent)', borderRadius: 'var(--radius-sm)' }}>
+                  {selectedEmailKeys.size > 0 && (() => {
+                    const selectedItems = emailItems.filter(it => selectedEmailKeys.has(emailKey(it)));
+                    const reschedulableCount = selectedItems.filter(it =>
+                      it.status === 'scheduled' || it.status === 'draft_pending' || it.status === 'approved'
+                    ).length;
+                    return (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'var(--accent-dim)', border: '1px solid var(--border-accent)', borderRadius: 'var(--radius-sm)', flexWrap: 'wrap' }}>
                       <span style={{ fontSize: '0.82rem', fontWeight: 600, color: 'var(--accent-secondary)' }}>
                         {selectedEmailKeys.size} selected
                       </span>
                       <div style={{ width: 1, height: 16, background: 'var(--border-accent)' }} />
+                      {reschedulableCount > 0 && !bulkRescheduleOpen && (
+                        <button
+                          className="ghost"
+                          style={{ fontSize: '0.78rem', color: 'var(--accent-secondary)', padding: '3px 10px' }}
+                          onClick={() => setBulkRescheduleOpen(true)}
+                        >
+                          Reschedule {reschedulableCount} email{reschedulableCount !== 1 ? 's' : ''}
+                        </button>
+                      )}
+                      {bulkRescheduleOpen && (
+                        <>
+                          <input
+                            type="datetime-local"
+                            value={bulkRescheduleDate}
+                            onChange={e => setBulkRescheduleDate(e.target.value)}
+                            style={{ fontSize: '0.78rem', padding: '3px 6px' }}
+                            autoFocus
+                          />
+                          <button
+                            className="ghost"
+                            style={{ fontSize: '0.78rem', color: 'var(--accent-secondary)', padding: '3px 10px' }}
+                            onClick={handleBulkEmailReschedule}
+                            disabled={!bulkRescheduleDate}
+                          >
+                            Apply to {reschedulableCount}
+                          </button>
+                          <button
+                            className="ghost"
+                            style={{ fontSize: '0.78rem', color: 'var(--text-muted)', padding: '3px 8px' }}
+                            onClick={() => { setBulkRescheduleOpen(false); setBulkRescheduleDate(''); }}
+                          >
+                            ✕
+                          </button>
+                          <div style={{ width: 1, height: 16, background: 'var(--border-accent)' }} />
+                        </>
+                      )}
                       {selectedCancellable.length > 0 && (
                         <button
                           className="ghost"
@@ -1690,7 +1769,8 @@ const SequenceManager = () => {
                         ✕ Clear
                       </button>
                     </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Table */}
                   {emailsLoading ? (
