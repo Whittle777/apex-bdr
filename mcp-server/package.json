@@ -1,0 +1,18 @@
+{
+  "name": "apex-bdr-mcp-server",
+  "version": "1.0.0",
+  "description": "Local MCP (stdio) server that lets Claude Desktop send email through the apex-bdr app's existing Outlook integration. The app's Microsoft Graph credentials never leave the app — this server just brokers tool calls to the app's MCP bridge endpoint.",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test:local": "node test-local.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

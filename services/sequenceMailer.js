@@ -986,4 +986,10 @@ module.exports = {
   createPersonalizedDraft,
   prepareUpcomingDrafts,
   sendApprovedDraft,
+  // Exposed for the MCP bridge endpoint (routes/mcpBridge.js).
+  // The bridge needs the same Microsoft access-token refresh +
+  // body-formatting helpers; reusing them keeps a single source of
+  // truth for Outlook auth and HTML rendering.
+  getMicrosoftAccessToken,
+  linkify,
 };

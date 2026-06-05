@@ -25,6 +25,7 @@ const accountsRouter = require('./routes/accounts');
 const callsRouter = require('./routes/calls');
 const vmRecordingsRouter = require('./routes/vmRecordings');
 const researchRouter = require('./routes/research');
+const mcpBridgeRouter = require('./routes/mcpBridge');
 const cron = require('node-cron');
 const { runDueSequenceEmails, prepareUpcomingDrafts } = require('./services/sequenceMailer');
 const { runReplyDetection } = require('./services/replyDetector');
@@ -62,6 +63,7 @@ app.use('/accounts', accountsRouter);
 app.use('/calls', callsRouter);
 app.use('/vm-recordings', vmRecordingsRouter);
 app.use('/research', researchRouter);
+app.use('/api/mcp', mcpBridgeRouter);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Apex BDR API' });
