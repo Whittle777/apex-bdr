@@ -15,6 +15,13 @@ model User {
   email       String   @unique
   name        String?
   azureAdId   String?  // Azure AD object ID (oid) — required for Teams Calls API
+  // Per-user MCP bridge token (Claude Desktop). Plaintext is shown to
+  // the user once at generation; we only persist a SHA-256 hash so a DB
+  // leak doesn't expose the token. mcpTokenHint stores the last 4 chars
+  // of the plaintext so the UI can show "ending in …ABCD".
+  mcpTokenHash       String?
+  mcpTokenHint       String?
+  mcpTokenCreatedAt  DateTime?
   createdAt   DateTime @default(now())
 
   sequences              Sequence[]

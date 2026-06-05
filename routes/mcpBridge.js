@@ -13,6 +13,7 @@
  */
 const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 const router = express.Router();
 
 const prisma = require('../services/database');
@@ -25,16 +26,50 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ok = (s) => typeof s === 'string' && s.trim().length > 0;
 const isEmail = (s) => ok(s) && EMAIL_RE.test(s.trim());
 
-function requireBridgeToken(req, res, next) {
+const hashToken = (plain) => crypto.createHash('sha256').update(plain).digest('hex');
+const isApexUserToken = (s) => typeof s === 'string' && s.startsWith('apexbdr_');
+
+// Auth middleware. Two accepted forms:
+//   (a) Per-user token  — Bearer apexbdr_…  → identifies the user; the
+//       bridge will use THIS user's Microsoft account by default.
+//   (b) Legacy shared token — Bearer <MCP_BRIDGE_TOKEN env value>  →
+//       single-account mode; bridge picks the first connected Microsoft
+//       credential. Backward-compatible with the original setup.
+//
+// At least one of the two must be configured. If neither MCP_BRIDGE_TOKEN
+// is set NOR any User has an mcpTokenHash, the endpoint is effectively
+// off (503).
+async function requireBridgeAuth(req, res, next) {
+  const auth = req.headers.authorization || '';
+  const provided = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  if (!provided) {
+    return res.status(401).json({ ok: false, error: 'Missing Authorization: Bearer <token>' });
+  }
+
+  // (a) Per-user token path
+  if (isApexUserToken(provided)) {
+    try {
+      const hash = hashToken(provided);
+      const user = await prisma.user.findFirst({ where: { mcpTokenHash: hash } });
+      if (user) {
+        req.mcpUser = user;
+        return next();
+      }
+    } catch (err) {
+      console.error('[mcpBridge] user-token lookup failed:', err.message);
+      return res.status(500).json({ ok: false, error: 'Token lookup failed' });
+    }
+    return res.status(401).json({ ok: false, error: 'Invalid per-user MCP token' });
+  }
+
+  // (b) Legacy shared token path
   const expected = process.env.MCP_BRIDGE_TOKEN;
   if (!expected) {
     return res.status(503).json({
       ok: false,
-      error: 'MCP bridge disabled (set MCP_BRIDGE_TOKEN to enable)',
+      error: 'MCP bridge disabled. Either generate a per-user token in Integrations or set MCP_BRIDGE_TOKEN on the server.',
     });
   }
-  const auth = req.headers.authorization || '';
-  const provided = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (provided !== expected) {
     return res.status(401).json({ ok: false, error: 'Invalid bridge token' });
   }
@@ -53,7 +88,7 @@ router.get('/health', (req, res) => {
 // POST /api/mcp/send-email
 // Body: { to, subject, body, cc?, bcc?, from? }
 // Returns 200 { ok: true, ... } on success, 4xx/5xx { ok: false, error } otherwise.
-router.post('/send-email', requireBridgeToken, async (req, res) => {
+router.post('/send-email', requireBridgeAuth, async (req, res) => {
   const startedAt = Date.now();
   const { to, subject, body, cc, bcc, from } = req.body || {};
 
@@ -66,15 +101,24 @@ router.post('/send-email', requireBridgeToken, async (req, res) => {
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
 
   // ── Pick the sending account ────────────────────────────────────────────
-  // If the caller supplied `from`, look up the matching Microsoft
-  // credential. Otherwise grab the first connected account. (In practice
-  // there's one operator account per local install.)
+  // Priority:
+  //   1. If a per-user token authed this call → use THAT user's Microsoft
+  //      credential. Each teammate sends from their own Outlook. The
+  //      `from` arg is ignored in this mode to prevent impersonation.
+  //   2. Else (legacy shared-token path): use `from` if provided to pick
+  //      a specific account; otherwise the first connected one.
   let cred;
   try {
-    cred = await prisma.integrationCredential.findFirst({
-      where: { provider: 'microsoft', ...(from ? { email: from } : {}) },
-      orderBy: { id: 'asc' },
-    });
+    if (req.mcpUser) {
+      cred = await prisma.integrationCredential.findUnique({
+        where: { provider_userId: { provider: 'microsoft', userId: req.mcpUser.id } },
+      });
+    } else {
+      cred = await prisma.integrationCredential.findFirst({
+        where: { provider: 'microsoft', ...(from ? { email: from } : {}) },
+        orderBy: { id: 'asc' },
+      });
+    }
   } catch (err) {
     console.error('[mcpBridge] credential lookup failed:', err.message);
     return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
@@ -82,7 +126,9 @@ router.post('/send-email', requireBridgeToken, async (req, res) => {
   if (!cred) {
     return res.status(412).json({
       ok: false,
-      error: from
+      error: req.mcpUser
+        ? `User ${req.mcpUser.email} has not connected a Microsoft 365 account yet. Sign in with Microsoft in Integrations first.`
+        : from
         ? `No Microsoft 365 credential found for "${from}"`
         : 'No Microsoft 365 account is connected. Open the app and sign in with Microsoft first.',
     });

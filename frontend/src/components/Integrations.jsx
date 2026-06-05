@@ -313,6 +313,192 @@ const VoiceSection = ({ integrations, onUpdate, toast }) => {
   );
 };
 
+// ─── Claude Desktop MCP section ─────────────────────────────────────────────
+const ClaudeDesktopMcpSection = ({ toast }) => {
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState(null);   // { configured, hint, createdAt }
+  const [token, setToken] = useState(null);     // only present immediately after generate
+  const [busy, setBusy] = useState(false);
+  const [copied, setCopied] = useState('');     // 'config' | 'token'
+  const [confirmRevoke, setConfirmRevoke] = useState(false);
+
+  useEffect(() => {
+    api.get('/users/me/mcp-token').then(r => setStatus(r.data)).catch(() => {});
+  }, []);
+
+  // Pre-compute the claude_desktop_config.json snippet for this user.
+  // Uses the current site origin as MCP_BRIDGE_URL so it points at
+  // wherever they're hosted (Railway, localhost, etc.). The token is
+  // baked in if we just generated one; otherwise <PASTE-YOUR-TOKEN-HERE>.
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://your-app.example.com';
+  const configSnippet = JSON.stringify({
+    mcpServers: {
+      'apex-bdr': {
+        command: 'node',
+        args: ['/ABSOLUTE/PATH/TO/apex-bdr/mcp-server/index.js'],
+        env: {
+          MCP_BRIDGE_URL: origin,
+          MCP_BRIDGE_TOKEN: token || '<PASTE-YOUR-TOKEN-HERE>',
+        },
+      },
+    },
+  }, null, 2);
+
+  const handleGenerate = async () => {
+    setBusy(true);
+    try {
+      const { data } = await api.post('/users/me/mcp-token');
+      setToken(data.token);
+      setStatus({ configured: true, hint: data.hint, createdAt: data.createdAt });
+      toast('MCP token generated — copy the config now, it will not be shown again', 'success', 5000);
+    } catch (err) {
+      toast(err.response?.data?.message || 'Failed to generate token', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRevoke = async () => {
+    setBusy(true);
+    try {
+      await api.delete('/users/me/mcp-token');
+      setStatus({ configured: false, hint: null, createdAt: null });
+      setToken(null);
+      setConfirmRevoke(false);
+      toast('MCP token revoked — Claude Desktop calls will now fail until you generate a new one', 'warning', 4500);
+    } catch (err) {
+      toast('Revoke failed', 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copy = async (what, text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(what);
+      setTimeout(() => setCopied(''), 1800);
+    } catch {
+      toast('Clipboard unavailable — select the text manually', 'warning');
+    }
+  };
+
+  const configured = !!status?.configured;
+
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <button
+        onClick={() => setOpen(o => !o)}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+          background: 'none', border: 'none', cursor: 'pointer', padding: '0 0 12px',
+          color: 'var(--text-muted)',
+        }}
+      >
+        <span style={{ fontSize: '0.68rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.1em' }}>Claude Desktop</span>
+        <span style={{ fontSize: '0.7rem', display: 'inline-block', transform: open ? 'rotate(90deg)' : 'rotate(0)' }}>▶</span>
+        {configured && <span style={{ fontSize: '0.62rem', padding: '1px 7px', background: 'var(--status-success-dim)', color: 'var(--status-success)', border: '1px solid var(--status-success-border)', borderRadius: 'var(--radius-full)', fontWeight: 700, marginLeft: 4 }}>Token set</span>}
+      </button>
+
+      {open && (
+        <div style={{
+          background: 'var(--bg-elevated)',
+          border: `1px solid ${configured ? 'rgba(74,222,128,0.3)' : 'var(--border-color)'}`,
+          borderTop: `3px solid ${configured ? '#4ade80' : 'var(--border-color)'}`,
+          borderRadius: 'var(--radius-lg)', padding: 20,
+          display: 'flex', flexDirection: 'column', gap: 14,
+        }}>
+          <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12 }}>
+            <div style={{ width: 42, height: 42, borderRadius: 10, background: 'rgba(74,222,128,0.1)', border: '1px solid rgba(74,222,128,0.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '1.2rem', flexShrink: 0 }}>
+              💬
+            </div>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <h3 style={{ margin: 0, fontSize: '0.95rem' }}>Claude Desktop email tool</h3>
+              <p style={{ margin: '2px 0 0', fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+                Generates a personal MCP token so a local Claude Desktop MCP server can send emails through <strong>your</strong> connected Microsoft 365 account. Token is hashed at rest; you'll see the plaintext exactly once.
+              </p>
+            </div>
+          </div>
+
+          {status?.createdAt && (
+            <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>
+              Current token: <code style={{ background: 'var(--bg-tertiary)', padding: '1px 6px', borderRadius: 4 }}>{status.hint || '…'}</code>
+              <span style={{ marginLeft: 8 }}>Created {new Date(status.createdAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}</span>
+            </div>
+          )}
+
+          {token && (
+            <div style={{ background: 'rgba(56,189,248,0.08)', border: '1px solid rgba(56,189,248,0.25)', borderRadius: 'var(--radius-md)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: '#38bdf8' }}>
+                ⚠ Save this now — it will not be shown again.
+              </div>
+              <code style={{ background: 'var(--bg-primary)', padding: '8px 10px', borderRadius: 'var(--radius-sm)', fontSize: '0.78rem', wordBreak: 'break-all', color: 'var(--text-primary)' }}>
+                {token}
+              </code>
+              <button
+                type="button"
+                onClick={() => copy('token', token)}
+                className="secondary"
+                style={{ alignSelf: 'flex-start', padding: '5px 12px', fontSize: '0.8rem' }}
+              >
+                {copied === 'token' ? '✓ Copied' : '📋 Copy token only'}
+              </button>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" disabled={busy} onClick={handleGenerate} style={{ padding: '8px 14px', fontSize: '0.85rem' }}>
+              {busy ? 'Working…' : configured ? '↻ Rotate token' : '✦ Generate token'}
+            </button>
+            {configured && !confirmRevoke && (
+              <button type="button" className="danger" onClick={() => setConfirmRevoke(true)} style={{ padding: '8px 14px', fontSize: '0.85rem' }}>
+                Revoke
+              </button>
+            )}
+            {confirmRevoke && (
+              <>
+                <button type="button" className="danger" disabled={busy} onClick={handleRevoke} style={{ padding: '8px 14px', fontSize: '0.85rem' }}>
+                  Confirm revoke
+                </button>
+                <button type="button" className="secondary" onClick={() => setConfirmRevoke(false)} style={{ padding: '8px 14px', fontSize: '0.85rem' }}>
+                  Cancel
+                </button>
+              </>
+            )}
+          </div>
+
+          {/* Always-visible setup snippet */}
+          <div style={{ background: 'var(--bg-tertiary)', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-md)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
+                Paste into <code>claude_desktop_config.json</code>:
+              </div>
+              <button
+                type="button"
+                onClick={() => copy('config', configSnippet)}
+                style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+              >
+                {copied === 'config' ? '✓ Copied config' : '📋 Copy config'}
+              </button>
+            </div>
+            <pre style={{ margin: 0, padding: 10, background: 'var(--bg-primary)', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-sm)', fontSize: '0.72rem', lineHeight: 1.45, overflowX: 'auto', color: 'var(--text-primary)' }}>
+{configSnippet}
+            </pre>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', lineHeight: 1.5 }}>
+              <strong>Where this file lives:</strong>
+              <ul style={{ margin: '4px 0 0 18px', padding: 0 }}>
+                <li><strong>macOS:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code></li>
+                <li><strong>Windows:</strong> <code>%APPDATA%\Claude\claude_desktop_config.json</code></li>
+              </ul>
+              Replace <code>/ABSOLUTE/PATH/TO/apex-bdr/mcp-server/index.js</code> with the real path on your machine (run <code>pwd</code> inside that folder to get it). {token ? 'The token in the snippet above is yours and is already filled in — just copy and paste.' : 'Generate a token above to have it filled in automatically here.'} Restart Claude Desktop after pasting.
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 // ─── Apify (LinkedIn scraper) section ───────────────────────────────────────
 const ApifySection = ({ integrations, onUpdate, toast }) => {
   const [open, setOpen] = useState(false);
@@ -915,6 +1101,9 @@ const Integrations = () => {
 
       {/* Research / LinkedIn enrichment — Apify */}
       <ApifySection integrations={integrations} onUpdate={fetchIntegrations} toast={toast} />
+
+      {/* Claude Desktop MCP — per-user bridge token */}
+      <ClaudeDesktopMcpSection toast={toast} />
 
       {/* Help notes */}
       <div style={{ marginTop: 24, display: 'flex', flexDirection: 'column', gap: 10 }}>
