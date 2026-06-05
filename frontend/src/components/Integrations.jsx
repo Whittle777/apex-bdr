@@ -344,6 +344,64 @@ const ClaudeDesktopMcpSection = ({ toast }) => {
     },
   }, null, 2);
 
+  // A personalised prompt the user can paste into Claude Code (the CLI
+  // agent that has filesystem + shell access). Claude Code reads the
+  // existing claude_desktop_config.json, merges in the apex-bdr entry,
+  // downloads the local MCP server files from this repo, and runs
+  // npm install. The user just approves each tool call.
+  const tokenForPrompt = token || (status?.configured ? '<the token you just generated — re-generate it above and paste here, or just rotate>' : '<click "Generate token" above first, then come back>');
+  const setupPrompt = `Please set up the apex-bdr Claude Desktop MCP server on this machine. Below is everything you need; do it step by step and show me what you're about to write/run before each change so I can approve.
+
+PARAMETERS:
+- Bridge URL:   ${origin}
+- Personal MCP token (treat as a password — don't echo it to other places):
+  ${tokenForPrompt}
+
+STEPS:
+
+1. Create a folder for the MCP server at \`~/apex-bdr-mcp\` (Linux/macOS) or \`%USERPROFILE%\\apex-bdr-mcp\` (Windows). If it already exists, fine — keep it.
+
+2. Download the two files below from the apex-bdr repo into that folder. Use curl on macOS/Linux or Invoke-WebRequest on Windows. They are public files in the public repo:
+   - https://raw.githubusercontent.com/Whittle777/apex-bdr/main/mcp-server/index.js  → save as index.js
+   - https://raw.githubusercontent.com/Whittle777/apex-bdr/main/mcp-server/package.json → save as package.json
+
+3. In that folder, run \`npm install\`. Node 18+ is required; verify with \`node -v\` first and tell me if it's older.
+
+4. Find Claude Desktop's config file:
+   - macOS:   \`~/Library/Application Support/Claude/claude_desktop_config.json\`
+   - Windows: \`%APPDATA%\\Claude\\claude_desktop_config.json\`
+   - Linux:   \`~/.config/Claude/claude_desktop_config.json\`
+   If the file or its parent directory doesn't exist, create them with an empty \`{}\` first.
+
+5. Read that file. Parse it as JSON. If parsing fails, STOP and show me the file contents — don't overwrite.
+
+6. Merge (don't overwrite) an \`apex-bdr\` entry under \`mcpServers\`:
+   \`\`\`json
+   {
+     "mcpServers": {
+       "apex-bdr": {
+         "command": "node",
+         "args": ["<absolute path to the index.js you just downloaded>"],
+         "env": {
+           "MCP_BRIDGE_URL": "${origin}",
+           "MCP_BRIDGE_TOKEN": "${tokenForPrompt}"
+         }
+       }
+     }
+   }
+   \`\`\`
+   Preserve any other servers already in the file. Resolve \`~\` / env vars to an absolute path for the \`args\` entry — Claude Desktop does not expand them.
+
+7. Write the merged JSON back, pretty-printed with 2-space indent.
+
+8. Tell me to fully quit Claude Desktop (Cmd+Q on macOS, full Quit on Windows) and reopen it. After restart, the \`apex-bdr\` MCP server should appear in the tools list with a \`send_email\` tool.
+
+9. Optional smoke test: from the same folder, suggest I run
+   \`MCP_BRIDGE_URL=${origin} MCP_BRIDGE_TOKEN=${tokenForPrompt} node test-local.js me@c3.ai "Setup test" "Hello from MCP."\`
+   to verify the bridge end-to-end before involving Claude Desktop. (You'd need to also download test-local.js from the same repo path to do this — only run this if I confirm.)
+
+If anything fails along the way, stop and tell me exactly which step and what the error was. Never write a token to a logged location or paste it into a public chat.`;
+
   const handleGenerate = async () => {
     setBusy(true);
     try {
@@ -467,11 +525,37 @@ const ClaudeDesktopMcpSection = ({ toast }) => {
             )}
           </div>
 
-          {/* Always-visible setup snippet */}
+          {/* One-click setup via Claude Code */}
+          <div style={{ background: 'rgba(167,139,250,0.08)', border: '1px solid rgba(167,139,250,0.25)', borderRadius: 'var(--radius-md)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              <div style={{ fontSize: '0.82rem', fontWeight: 700, color: '#a78bfa' }}>
+                ⚡ One-click setup via Claude Code
+              </div>
+              <button
+                type="button"
+                onClick={() => copy('claudePrompt', setupPrompt)}
+                disabled={!status?.configured}
+                style={{ padding: '4px 12px', fontSize: '0.78rem', background: 'rgba(167,139,250,0.18)', color: '#a78bfa', border: '1px solid rgba(167,139,250,0.3)', borderRadius: 'var(--radius-sm)', fontWeight: 700, cursor: status?.configured ? 'pointer' : 'not-allowed', opacity: status?.configured ? 1 : 0.5 }}
+              >
+                {copied === 'claudePrompt' ? '✓ Copied setup prompt' : '📋 Copy setup prompt'}
+              </button>
+            </div>
+            <div style={{ fontSize: '0.74rem', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+              {status?.configured ? (
+                <>
+                  Open <a href="https://claude.com/claude-code" target="_blank" rel="noreferrer" style={{ color: '#a78bfa' }}>Claude Code</a> (the CLI agent), start a new chat, and paste this prompt. Claude Code will download the MCP server, merge the entry into your <code>claude_desktop_config.json</code> (preserving any other servers you have), run <code>npm install</code>, and tell you when to restart Claude Desktop. <strong>Approve each step</strong> as Claude Code asks — there's no auto-run.
+                </>
+              ) : (
+                <>Generate a token above first, then this button activates.</>
+              )}
+            </div>
+          </div>
+
+          {/* Manual setup fallback snippet */}
           <div style={{ background: 'var(--bg-tertiary)', border: '1px dashed var(--border-color)', borderRadius: 'var(--radius-md)', padding: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
               <div style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-secondary)' }}>
-                Paste into <code>claude_desktop_config.json</code>:
+                Or paste manually into <code>claude_desktop_config.json</code>:
               </div>
               <button
                 type="button"
