@@ -2,6 +2,12 @@
 
 Lets Claude Desktop send emails through this app's existing Microsoft 365 / Outlook integration. The app already has IT-blessed permission to send via Outlook; Claude Desktop reaches that capability through a local stdio MCP server, never touching Outlook directly.
 
+**Tools exposed:**
+- `send_email` — fresh outbound send. Returns a `messageId` you can chain into a reply.
+- `reply_to_email` — true RFC 5322 threaded reply. `In-Reply-To` + `References` headers + `conversationId` all preserved by Microsoft Graph, so the reply lands in the same Outlook conversation as the original. Use this for sequence steps 2-N so follow-ups thread under the first send.
+
+Both tools only require the `Mail.Send` + `Mail.Read` scopes you've already granted. **No new admin consent needed.**
+
 ```
 Claude Desktop  ──stdio──▶  mcp-server (this folder)  ──HTTP──▶  apex-bdr app  ──Graph──▶  Outlook
                                        │
@@ -50,6 +56,8 @@ Requires Node 18+ (for the global `fetch`).
 
 With the app running on `localhost:3000`:
 
+**Send:**
+
 ```sh
 MCP_BRIDGE_URL=http://localhost:3000 \
 MCP_BRIDGE_TOKEN=<your secret> \
@@ -61,15 +69,32 @@ You should see:
 ```
 RESULT (ok):
 ✅ Sent.
-   from:    henry.whittle@c3.ai
-   to:      you@c3.ai
-   subject: Bridge test
-   latency: 812ms
+   from:       henry.whittle@c3.ai
+   to:         you@c3.ai
+   subject:    Bridge test
+   messageId:  AAMkAGE5MjU4...
+   inetMsgId:  <abc...@outlook.com>
+   convoId:    AAQkAGE5...
+   latency:    812ms
+
+To send a threaded reply later, pass the messageId above as inReplyToMessageId to reply_to_email.
 ```
 
-Check your Outlook Sent Items — the message should be there.
+**Reply** (using the `messageId` from the send above):
 
-If it fails, the result message will name the cause (token wrong, no Microsoft account connected, Graph rejected the send with code X, etc.).
+```sh
+MCP_BRIDGE_URL=http://localhost:3000 \
+MCP_BRIDGE_TOKEN=<your secret> \
+node test-local.js reply AAMkAGE5MjU4... "Following up on my note — does Thursday work?"
+```
+
+Optional flags:
+- `--replyAll` — reply to To + CC of the original instead of just the sender
+- `--noQuote` — send only the new body, skip the auto-quoted original
+
+Check Outlook — the reply should be in the same conversation as the original, with `Re: Bridge test` as subject.
+
+If anything fails, the result message will name the cause (token wrong, no Microsoft account connected, message ID not found, Graph rejected with code X, etc.).
 
 ---
 
@@ -121,6 +146,20 @@ Claude will propose calling `send_email(...)`. **Claude Desktop will show the pe
 - **Timeout**: 15s per tool call (override with `MCP_REQUEST_TIMEOUT_MS`).
 - **HTML / links in body**: the bridge auto-linkifies bare URLs and `[label](url)` markdown. You can also paste raw HTML and it'll be sent as-is.
 - **Choosing the sending account**: if you have multiple Microsoft accounts connected to the app, pass `from` to the tool with the address you want to send from. Otherwise the bridge picks the first connected account.
+
+### Threading model for `reply_to_email`
+
+Microsoft Graph offers three reply patterns. We use the one that gives true threading with the smallest scope footprint:
+
+| Pattern | Scopes needed | True thread? | Body control? |
+|---|---|---|---|
+| `/me/messages/{id}/createReply` → patch → `/send` | `Mail.ReadWrite` + `Mail.Send` | ✅ | full |
+| `/me/sendMail` with custom `internetMessageHeaders` | `Mail.Send` | ❌ Graph rejects `In-Reply-To`/`References` (only `x-*` allowed) | full |
+| **`/me/messages/{id}/reply` with `message.body` override** ← what we use | `Mail.Send` | ✅ | full |
+
+The `/reply` endpoint asks Graph to handle the threading on its end — it sets `In-Reply-To`, `References`, and inherits `conversationId` from the original — while still letting us override the body with our own HTML. When `includeOriginalBody=true`, we manually `GET /me/messages/{id}` to fetch the original and prepend our content above a styled quote block (needs `Mail.Read`, already granted).
+
+**ID accepted:** the Graph resource ID (long opaque base64-ish string, what `send_email` returns as `messageId`). RFC 5322 `internetMessageId` values (containing `@`, often `<…>`-wrapped) are also accepted and auto-resolved to the Graph ID via `$filter=internetMessageId eq '…'`.
 
 ---
 

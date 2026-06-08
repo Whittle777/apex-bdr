@@ -41,18 +41,18 @@ const ok = (s) => typeof s === 'string' && s.trim().length > 0;
 const isEmail = (s) => ok(s) && EMAIL_RE.test(s.trim());
 
 /**
- * Call the apex-bdr send-email bridge endpoint. Pure HTTP — no
- * Microsoft/Graph state lives in this process. AbortController gives us
- * a hard timeout independent of the OS TCP settings.
+ * Call an apex-bdr bridge endpoint. Pure HTTP — no Microsoft/Graph state
+ * lives in this process. AbortController gives us a hard timeout
+ * independent of the OS TCP settings.
  */
-async function callBridge(params) {
+async function callBridge(path, params) {
   if (!BRIDGE_TOKEN) {
     return {
       ok: false,
       error: 'MCP_BRIDGE_TOKEN is not set on this MCP server process. Configure it in claude_desktop_config.json.',
     };
   }
-  const url = `${BRIDGE_URL}/api/mcp/send-email`;
+  const url = `${BRIDGE_URL}${path}`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
@@ -102,16 +102,22 @@ export async function runSendEmail({ to, subject, body, cc, bcc, from }) {
   }
 
   log(`send_email: → ${to}, subject="${subject.slice(0, 80)}"${from ? `, from=${from}` : ''}`);
-  const result = await callBridge({ to, subject, body, cc, bcc, from });
+  const result = await callBridge('/api/mcp/send-email', { to, subject, body, cc, bcc, from });
   if (result.ok) {
     const lines = [
       '✅ Sent.',
-      `   from:    ${result.from}`,
-      `   to:      ${result.to}`,
-      ...(result.cc  ? [`   cc:      ${result.cc}`]  : []),
-      ...(result.bcc ? [`   bcc:     ${result.bcc}`] : []),
-      `   subject: ${result.subject}`,
-      `   latency: ${result.elapsedMs}ms`,
+      `   from:       ${result.from}`,
+      `   to:         ${result.to}`,
+      ...(result.cc  ? [`   cc:         ${result.cc}`]  : []),
+      ...(result.bcc ? [`   bcc:        ${result.bcc}`] : []),
+      `   subject:    ${result.subject}`,
+      ...(result.messageId         ? [`   messageId:  ${result.messageId}`]         : []),
+      ...(result.internetMessageId ? [`   inetMsgId:  ${result.internetMessageId}`] : []),
+      ...(result.conversationId    ? [`   convoId:    ${result.conversationId}`]    : []),
+      `   latency:    ${result.elapsedMs}ms`,
+      ...(result.messageId
+        ? ['', 'To send a threaded reply later, pass the messageId above as inReplyToMessageId to reply_to_email.']
+        : []),
     ];
     return { isError: false, text: lines.join('\n') };
   }
@@ -119,6 +125,55 @@ export async function runSendEmail({ to, subject, body, cc, bcc, from }) {
   return {
     isError: true,
     text: `❌ Send failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}`,
+  };
+}
+
+/**
+ * Threaded reply. Calls /api/mcp/reply-email on the bridge, which sends
+ * via Graph's /me/messages/{id}/reply (or /replyAll) so In-Reply-To and
+ * References are set correctly and the new message inherits the original
+ * conversationId.
+ */
+export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc, replyAll, includeOriginalBody }) {
+  const errors = [];
+  if (!ok(inReplyToMessageId)) errors.push('"inReplyToMessageId" is required (the messageId returned by send_email, or the original\'s internetMessageId)');
+  if (!ok(body))               errors.push('"body" is required and must be non-empty');
+  if (cc   && !isEmail(cc))    errors.push('"cc" must be a valid email address if provided');
+  if (bcc  && !isEmail(bcc))   errors.push('"bcc" must be a valid email address if provided');
+  if (from && !isEmail(from))  errors.push('"from" must be a valid email address if provided');
+  if (errors.length > 0) {
+    return { isError: true, text: `❌ Input validation failed:\n - ${errors.join('\n - ')}` };
+  }
+
+  log(`reply_to_email: → inReplyTo=${inReplyToMessageId.slice(0, 40)}…, replyAll=${!!replyAll}, includeOriginal=${includeOriginalBody !== false}`);
+  const result = await callBridge('/api/mcp/reply-email', {
+    inReplyToMessageId,
+    body,
+    from,
+    cc,
+    bcc,
+    replyAll: !!replyAll,
+    includeOriginalBody: includeOriginalBody !== false, // default true
+  });
+  if (result.ok) {
+    const lines = [
+      `✅ Threaded reply sent${result.replyAll ? ' (replyAll)' : ''}.`,
+      `   from:           ${result.from}`,
+      `   inReplyTo:      ${result.inReplyToMessageId}`,
+      ...(result.cc  ? [`   cc:             ${result.cc}`]  : []),
+      ...(result.bcc ? [`   bcc:            ${result.bcc}`] : []),
+      ...(result.messageId         ? [`   newMessageId:   ${result.messageId}`]         : []),
+      ...(result.internetMessageId ? [`   newInetMsgId:   ${result.internetMessageId}`] : []),
+      ...(result.conversationId    ? [`   convoId:        ${result.conversationId}`]    : []),
+      `   includedQuote:  ${result.includedOriginalBody ? 'yes' : 'no'}`,
+      `   latency:        ${result.elapsedMs}ms`,
+    ];
+    return { isError: false, text: lines.join('\n') };
+  }
+  warn('reply failed:', result.error);
+  return {
+    isError: true,
+    text: `❌ Reply failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}`,
   };
 }
 
@@ -146,6 +201,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         '',
         'IMPORTANT: The user must approve each call via the Claude Desktop',
         'permission prompt before this fires. There is no auto-approve.',
+        '',
+        'Returns a messageId you can later pass to reply_to_email to send a',
+        'true RFC 5322 threaded follow-up.',
       ].join('\n'),
       inputSchema: {
         type: 'object',
@@ -161,21 +219,71 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['to', 'subject', 'body'],
       },
     },
+    {
+      name: 'reply_to_email',
+      description: [
+        'Send a true RFC 5322 threaded reply to an existing email through the',
+        'apex-bdr app. The reply lands in the same Outlook conversation as the',
+        'original — In-Reply-To and References headers are set automatically by',
+        "Microsoft Graph, and conversationId is preserved. Recipient mail clients",
+        '(Outlook, Gmail, Apple Mail) thread it under the original.',
+        '',
+        'Use this for sequence steps 2-N when you want the follow-up to chain',
+        "under the first send. The original message must have been sent or",
+        "received in this mailbox so it's visible to Graph.",
+        '',
+        'IMPORTANT: The user must approve each call via the Claude Desktop',
+        'permission prompt before this fires. There is no auto-approve.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          inReplyToMessageId: {
+            type: 'string',
+            description: 'The Graph message ID of the message being replied to (long opaque string returned by send_email as `messageId`). RFC 5322 internetMessageId values (containing "@", often wrapped in <…>) are also accepted and resolved automatically.',
+          },
+          body: {
+            type: 'string',
+            description: 'The reply body. Plain text OR HTML. Bare URLs and markdown [label](url) become clickable. Do NOT include a quoted-original block manually — when includeOriginalBody is true (default) the bridge fetches the original and appends it for you.',
+          },
+          from: {
+            type: 'string',
+            description: 'Optional. Pick a specific connected Microsoft account. Defaults to the first connected account. Ignored when authed via a per-user token (in that mode the token IS the identity).',
+          },
+          cc:       { type: 'string', description: 'Optional CC address (added on top of any CC inherited via replyAll).' },
+          bcc:      { type: 'string', description: 'Optional BCC address.' },
+          replyAll: {
+            type: 'boolean',
+            description: 'If true, replies to all recipients of the original (To + CC). If false (default), replies only to the original sender.',
+          },
+          includeOriginalBody: {
+            type: 'boolean',
+            description: 'If true (default), the original message body is appended below the new content with a standard quote block. If false, only the new body is sent (clean follow-up without history).',
+          },
+        },
+        required: ['inReplyToMessageId', 'body'],
+      },
+    },
   ],
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params || {};
-  if (name !== 'send_email') {
+  let outcome;
+  if (name === 'send_email') {
+    outcome = await runSendEmail(args || {});
+  } else if (name === 'reply_to_email') {
+    outcome = await runReplyToEmail(args || {});
+  } else {
     return {
       isError: true,
       content: [{ type: 'text', text: `Unknown tool: ${name}` }],
     };
   }
-  const { isError, text } = await runSendEmail(args || {});
   return {
-    isError,
-    content: [{ type: 'text', text }],
+    isError: outcome.isError,
+    content: [{ type: 'text', text: outcome.text }],
   };
 });
 

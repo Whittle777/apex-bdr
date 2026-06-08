@@ -181,6 +181,18 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     });
   }
 
+  // Best-effort: read the just-sent message back from Sent Items so we
+  // can return its Graph message ID + internetMessageId + conversationId.
+  // Callers (e.g. reply_to_email) need the Graph ID to thread follow-ups.
+  // Sent Items can lag the Graph index by ~1-2s, so we don't fail the
+  // send if the lookup misses.
+  let lookedUp = null;
+  try {
+    lookedUp = await lookupSentMessage(token.accessToken, to, subject);
+  } catch (err) {
+    console.warn(`[mcpBridge] sent ok but Sent Items lookup failed: ${err.message}`);
+  }
+
   const elapsedMs = Date.now() - startedAt;
   console.log(`[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${elapsedMs}ms`);
   return res.json({
@@ -191,6 +203,251 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     cc: cc || null,
     bcc: bcc || null,
     subject,
+    messageId:         lookedUp?.id || null,
+    internetMessageId: lookedUp?.internetMessageId || null,
+    conversationId:    lookedUp?.conversationId || null,
+    elapsedMs,
+  });
+});
+
+/**
+ * Read the just-sent message back from Sent Items by recipient + subject
+ * + recency. Used to capture the Graph message ID so subsequent
+ * reply_to_email calls can thread off it. Lookup is best-effort; if it
+ * misses, the send is still successful and we return null.
+ */
+async function lookupSentMessage(accessToken, toEmail, subject) {
+  const sinceIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+  const escSubject = (subject || '').replace(/'/g, "''");
+  const res = await axios.get(
+    `https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages` +
+    `?$top=10&$orderby=sentDateTime desc` +
+    `&$select=id,internetMessageId,conversationId,subject,sentDateTime,toRecipients` +
+    `&$filter=sentDateTime ge ${sinceIso} and subject eq '${escSubject}'`,
+    { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
+  );
+  const candidates = res.data?.value || [];
+  return candidates.find(m =>
+    (m.toRecipients || []).some(r => r.emailAddress?.address?.toLowerCase() === toEmail.toLowerCase())
+  ) || null;
+}
+
+/**
+ * Resolve a Graph message ID. Accepts:
+ *   - Graph resource ID (long opaque string, the usual format), returned as-is
+ *   - RFC 5322 internetMessageId (contains "@", often wrapped in <…>), looked
+ *     up via $filter against the user's mail
+ * Returns null if no match is found.
+ */
+async function resolveGraphMessageId(accessToken, inReplyTo) {
+  if (!inReplyTo) return null;
+  // Internet Message-IDs are RFC 5322 — contain @ and often wrapped in <…>.
+  // Graph resource IDs are base64-ish and don't contain @.
+  if (inReplyTo.includes('@')) {
+    const esc = inReplyTo.replace(/'/g, "''");
+    const res = await axios.get(
+      `https://graph.microsoft.com/v1.0/me/messages?$top=1&$select=id&$filter=internetMessageId eq '${esc}'`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
+    );
+    return res.data?.value?.[0]?.id || null;
+  }
+  // Otherwise treat as Graph ID and confirm by HEAD-ish GET.
+  try {
+    const res = await axios.get(
+      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(inReplyTo)}?$select=id`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
+    );
+    return res.data?.id || null;
+  } catch {
+    return null;
+  }
+}
+
+// POST /api/mcp/reply-email
+// True RFC 5322 threaded reply. Uses the Graph /reply (or /replyAll)
+// endpoint with message.body override, so threading + In-Reply-To +
+// References + conversationId are all handled by Graph. No Mail.ReadWrite
+// needed; works with the existing Mail.Send + Mail.Read scopes.
+//
+// Body: {
+//   inReplyToMessageId: string,   // Graph message ID or RFC 5322 Message-ID
+//   body: string,
+//   from?: string,                // ignored when authed via per-user token
+//   cc?: string,
+//   bcc?: string,
+//   replyAll?: boolean,           // default false
+//   includeOriginalBody?: boolean // default true; appends original below new content
+// }
+router.post('/reply-email', requireBridgeAuth, async (req, res) => {
+  const startedAt = Date.now();
+  const {
+    inReplyToMessageId, body, from, cc, bcc,
+    replyAll = false, includeOriginalBody = true,
+  } = req.body || {};
+
+  // ── Validate ────────────────────────────────────────────────────────────
+  if (!ok(inReplyToMessageId)) return res.status(400).json({ ok: false, error: '"inReplyToMessageId" is required' });
+  if (!ok(body))               return res.status(400).json({ ok: false, error: '"body" is required' });
+  if (cc  && !isEmail(cc))     return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
+  if (bcc && !isEmail(bcc))    return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
+  if (from && !isEmail(from))  return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
+
+  // ── Pick the sending account (same rules as /send-email) ────────────────
+  let cred;
+  try {
+    if (req.mcpUser) {
+      cred = await prisma.integrationCredential.findUnique({
+        where: { provider_userId: { provider: 'microsoft', userId: req.mcpUser.id } },
+      });
+    } else {
+      cred = await prisma.integrationCredential.findFirst({
+        where: { provider: 'microsoft', ...(from ? { email: from } : {}) },
+        orderBy: { id: 'asc' },
+      });
+    }
+  } catch (err) {
+    console.error('[mcpBridge] credential lookup failed:', err.message);
+    return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
+  }
+  if (!cred) {
+    return res.status(412).json({
+      ok: false,
+      error: req.mcpUser
+        ? `User ${req.mcpUser.email} has not connected a Microsoft 365 account yet.`
+        : 'No Microsoft 365 account is connected.',
+    });
+  }
+
+  // ── Refresh access token ────────────────────────────────────────────────
+  let token;
+  try {
+    token = await getMicrosoftAccessToken(cred.userId);
+  } catch (err) {
+    console.error('[mcpBridge] token refresh failed:', err.message);
+    return res.status(502).json({ ok: false, error: `Microsoft token refresh failed: ${err.message}` });
+  }
+
+  // ── Resolve to a Graph message ID ───────────────────────────────────────
+  let graphMessageId;
+  try {
+    graphMessageId = await resolveGraphMessageId(token.accessToken, inReplyToMessageId);
+  } catch (err) {
+    return res.status(502).json({ ok: false, error: `Failed to resolve inReplyToMessageId: ${err.message}` });
+  }
+  if (!graphMessageId) {
+    return res.status(404).json({
+      ok: false,
+      error: `Could not find a message matching "${inReplyToMessageId}" in this mailbox. Pass the Graph message ID returned by send_email, or the original message's internetMessageId.`,
+    });
+  }
+
+  // ── Optionally fetch original for quoting ───────────────────────────────
+  // When includeOriginalBody=true (default), we manually prepend the new
+  // content above the original. Graph's /reply with message.body override
+  // does NOT auto-append the original — only the `comment` flow does, and
+  // that's text-only. Doing it manually keeps full HTML control.
+  let originalQuoteHtml = '';
+  let originalSubject = null;
+  let originalConversationId = null;
+  if (includeOriginalBody) {
+    try {
+      const orig = await axios.get(
+        `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}` +
+        `?$select=subject,from,sentDateTime,conversationId,body`,
+        { headers: { Authorization: `Bearer ${token.accessToken}` }, timeout: 10000 }
+      );
+      const m = orig.data || {};
+      originalSubject = m.subject;
+      originalConversationId = m.conversationId;
+      const senderName  = m.from?.emailAddress?.name    || m.from?.emailAddress?.address || 'sender';
+      const senderEmail = m.from?.emailAddress?.address || '';
+      const sentAt = m.sentDateTime ? new Date(m.sentDateTime).toLocaleString() : '';
+      const origBodyHtml = m.body?.contentType?.toLowerCase() === 'html'
+        ? (m.body?.content || '')
+        : `<pre style="font-family: inherit; white-space: pre-wrap;">${(m.body?.content || '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>`;
+      originalQuoteHtml =
+        `<br><br>` +
+        `<div style="border-left: 2px solid #ccc; padding-left: 12px; color: #666;">` +
+        `<div style="font-size: 0.85em; margin-bottom: 6px;">On ${sentAt}, ${senderName}${senderEmail ? ` &lt;${senderEmail}&gt;` : ''} wrote:</div>` +
+        origBodyHtml +
+        `</div>`;
+    } catch (err) {
+      // Non-fatal — we'll send without quoting, log the reason.
+      console.warn(`[mcpBridge] couldn't fetch original for quoting: ${err.message}`);
+    }
+  }
+
+  // ── Build the reply body ────────────────────────────────────────────────
+  const linkedBody = linkify(body);
+  const HTML_TAG = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i;
+  const newBodyHtml = HTML_TAG.test(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
+  const finalBodyHtml = newBodyHtml + originalQuoteHtml;
+
+  // ── Build the message override + send via /reply or /replyAll ───────────
+  const message = {
+    body: { contentType: 'HTML', content: finalBodyHtml },
+    ...(cc  ? { ccRecipients:  [{ emailAddress: { address: cc } }]  } : {}),
+    ...(bcc ? { bccRecipients: [{ emailAddress: { address: bcc } }] } : {}),
+  };
+  const endpoint = replyAll
+    ? `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}/replyAll`
+    : `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}/reply`;
+
+  try {
+    await axios.post(endpoint, { message }, {
+      headers: { Authorization: `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+  } catch (err) {
+    const status = err.response?.status;
+    const graphErr = err.response?.data?.error;
+    const detail = graphErr?.message || graphErr?.code || err.message;
+    console.error(`[mcpBridge] /reply failed (${status || '?'}): ${detail}`);
+    return res.status(502).json({
+      ok: false,
+      error: `Microsoft Graph rejected the reply (status ${status || '?'}): ${detail}`,
+    });
+  }
+
+  // Best-effort lookup of the new sent message so we can return its ID
+  // for further chaining (e.g. reply to a reply).
+  let lookedUp = null;
+  try {
+    // Reply subjects are "Re: <original>" — Outlook adds the prefix.
+    const replySubject = originalSubject
+      ? (originalSubject.toLowerCase().startsWith('re:') ? originalSubject : `Re: ${originalSubject}`)
+      : null;
+    if (replySubject) {
+      // For replyAll we don't know exactly who'll be on the To line,
+      // so skip the toEmail filter — pick the most recent matching subject.
+      const sinceIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+      const esc = replySubject.replace(/'/g, "''");
+      const res2 = await axios.get(
+        `https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages` +
+        `?$top=5&$orderby=sentDateTime desc` +
+        `&$select=id,internetMessageId,conversationId,sentDateTime` +
+        `&$filter=sentDateTime ge ${sinceIso} and subject eq '${esc}'`,
+        { headers: { Authorization: `Bearer ${token.accessToken}` }, timeout: 10000 }
+      );
+      lookedUp = (res2.data?.value || [])[0] || null;
+    }
+  } catch (err) {
+    console.warn(`[mcpBridge] reply sent ok but Sent Items lookup failed: ${err.message}`);
+  }
+
+  const elapsedMs = Date.now() - startedAt;
+  console.log(`[mcpBridge] ${replyAll ? 'replyAll' : 'reply'} ${cred.email} → message ${graphMessageId} in ${elapsedMs}ms`);
+  return res.json({
+    ok: true,
+    status: 'sent',
+    threaded: true,
+    from: cred.email,
+    inReplyToMessageId: graphMessageId,
+    replyAll: !!replyAll,
+    includedOriginalBody: !!includeOriginalBody && !!originalQuoteHtml,
+    messageId:         lookedUp?.id || null,
+    internetMessageId: lookedUp?.internetMessageId || null,
+    conversationId:    lookedUp?.conversationId || originalConversationId || null,
     elapsedMs,
   });
 });
