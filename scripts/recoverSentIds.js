@@ -109,7 +109,12 @@ async function main() {
   const foundCount = results.filter((r) => r.found).length;
 
   if (args.json) {
-    console.log(JSON.stringify({ mailbox: fromEmail, found: foundCount, total: results.length, results }, null, 2));
+    // stdout = a BARE LIST of result objects, so `> recovered.json` is
+    // directly consumable by downstream tooling (e.g. _backfill_messageids.py
+    // does `for r in json.load(...)`). The run summary goes to stderr so it
+    // never contaminates the captured JSON.
+    console.log(JSON.stringify(results, null, 2));
+    console.error(`[recoverSentIds] mailbox=${fromEmail} found=${foundCount}/${results.length}`);
   } else {
     for (const r of results) {
       if (r.found) {
