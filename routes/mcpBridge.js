@@ -18,6 +18,18 @@ const router = express.Router();
 
 const prisma = require('../services/database');
 const { getMicrosoftAccessToken, linkify } = require('../services/sequenceMailer');
+const { pollSentMessage } = require('../services/graphSentLookup');
+
+// Gate raw Graph request/response dumps behind an env flag so we can
+// diagnose capture failures in the field without spamming logs by default.
+// Set MCP_DEBUG_GRAPH=1 to enable. Dumps go to stderr.
+const GRAPH_DEBUG = process.env.MCP_DEBUG_GRAPH === '1';
+const dumpGraph = (label, status, headers, body) => {
+  if (!GRAPH_DEBUG) return;
+  console.error(`[mcpBridge][raw] ${label} → status=${status ?? '?'}`);
+  if (headers) console.error(`[mcpBridge][raw] ${label} headers=`, JSON.stringify(headers));
+  console.error(`[mcpBridge][raw] ${label} body=`, JSON.stringify(body ?? null, null, 2)?.slice(0, 4000));
+};
 
 // Loose RFC 5322-ish check — good enough to catch obvious typos. We
 // don't try to be a full RFC parser.
@@ -161,8 +173,13 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     ...(bcc ? { bccRecipients: [{ emailAddress: { address: bcc } }] } : {}),
   };
 
+  // Window for the post-send Sent-Items lookup starts just before we fire
+  // the send, so the poll filter (sentDateTime ge sinceIso) can't exclude
+  // the message we're about to send.
+  const sinceIso = new Date(Date.now() - 60 * 1000).toISOString();
+
   try {
-    await axios.post(
+    const sendResp = await axios.post(
       'https://graph.microsoft.com/v1.0/me/sendMail',
       { message, saveToSentItems: true },
       {
@@ -170,10 +187,14 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
         timeout: 15000,
       }
     );
+    // sendMail returns 202 Accepted with an EMPTY body — there is no id to
+    // capture here. That is the whole reason we poll Sent Items below.
+    dumpGraph('POST /me/sendMail', sendResp.status, sendResp.headers, sendResp.data);
   } catch (err) {
     const status = err.response?.status;
     const graphErr = err.response?.data?.error;
     const detail = graphErr?.message || graphErr?.code || err.message;
+    dumpGraph('POST /me/sendMail (error)', status, err.response?.headers, err.response?.data);
     console.error(`[mcpBridge] /me/sendMail failed (${status || '?'}): ${detail}`);
     return res.status(502).json({
       ok: false,
@@ -181,20 +202,43 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     });
   }
 
-  // Best-effort: read the just-sent message back from Sent Items so we
-  // can return its Graph message ID + internetMessageId + conversationId.
-  // Callers (e.g. reply_to_email) need the Graph ID to thread follow-ups.
-  // Sent Items can lag the Graph index by ~1-2s, so we don't fail the
-  // send if the lookup misses.
+  // Read the just-sent message back from Sent Items to recover its Graph
+  // message ID + internetMessageId + conversationId. Callers (e.g.
+  // reply_to_email) need a durable id to thread follow-ups.
+  //
+  // sendMail's 202 fires before the message is indexed in Sent Items, so a
+  // single immediate query almost always misses (that was the original
+  // bug). pollSentMessage retries with backoff over ~7s until it appears.
+  // This stays on the existing Mail.Read scope — no Mail.ReadWrite needed.
   let lookedUp = null;
+  let lookupError = null;
   try {
-    lookedUp = await lookupSentMessage(token.accessToken, to, subject);
+    const { message: found, attempts, lastError } = await pollSentMessage({
+      accessToken: token.accessToken,
+      toEmail: to,
+      subject,
+      sinceIso,
+      debug: GRAPH_DEBUG,
+    });
+    lookedUp = found;
+    lookupError = lastError;
+    if (GRAPH_DEBUG) console.error(`[mcpBridge] sent-items poll: ${found ? 'hit' : 'miss'} after ${attempts} attempt(s)`);
   } catch (err) {
-    console.warn(`[mcpBridge] sent ok but Sent Items lookup failed: ${err.message}`);
+    lookupError = err.message;
+    console.warn(`[mcpBridge] sent ok but Sent Items poll failed: ${err.message}`);
   }
 
   const elapsedMs = Date.now() - startedAt;
-  console.log(`[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${elapsedMs}ms`);
+  const captured = !!lookedUp?.id;
+  console.log(
+    `[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${elapsedMs}ms` +
+    ` — messageId ${captured ? 'captured' : 'NOT captured'}`
+  );
+
+  // Consistent, machine-readable response shape. ids are ALWAYS present as
+  // keys (null when not recovered) so downstream code never has to guess.
+  // On a miss we add an explicit `warning` so callers can detect it and
+  // fall back to the recovery utility rather than silently getting nothing.
   return res.json({
     ok: true,
     status: 'sent',
@@ -206,31 +250,16 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     messageId:         lookedUp?.id || null,
     internetMessageId: lookedUp?.internetMessageId || null,
     conversationId:    lookedUp?.conversationId || null,
+    ...(captured ? {} : {
+      warning:
+        'Email was sent, but its messageId could not be read back from Sent Items in time ' +
+        '(Graph indexing lag). Threading a reply to this message may require recovering the id ' +
+        'later via the Sent-Items recovery utility (scripts/recoverSentIds.js).' +
+        (lookupError ? ` Lookup error: ${lookupError}` : ''),
+    }),
     elapsedMs,
   });
 });
-
-/**
- * Read the just-sent message back from Sent Items by recipient + subject
- * + recency. Used to capture the Graph message ID so subsequent
- * reply_to_email calls can thread off it. Lookup is best-effort; if it
- * misses, the send is still successful and we return null.
- */
-async function lookupSentMessage(accessToken, toEmail, subject) {
-  const sinceIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-  const escSubject = (subject || '').replace(/'/g, "''");
-  const res = await axios.get(
-    `https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages` +
-    `?$top=10&$orderby=sentDateTime desc` +
-    `&$select=id,internetMessageId,conversationId,subject,sentDateTime,toRecipients` +
-    `&$filter=sentDateTime ge ${sinceIso} and subject eq '${escSubject}'`,
-    { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
-  );
-  const candidates = res.data?.value || [];
-  return candidates.find(m =>
-    (m.toRecipients || []).some(r => r.emailAddress?.address?.toLowerCase() === toEmail.toLowerCase())
-  ) || null;
-}
 
 /**
  * Resolve a Graph message ID. Accepts:
@@ -393,15 +422,21 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
     ? `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}/replyAll`
     : `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}/reply`;
 
+  // Window for the post-send lookup starts just before the reply fires.
+  const sinceIso = new Date(Date.now() - 60 * 1000).toISOString();
+
   try {
-    await axios.post(endpoint, { message }, {
+    const sendResp = await axios.post(endpoint, { message }, {
       headers: { Authorization: `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
       timeout: 15000,
     });
+    // /reply and /replyAll also return 202 Accepted with an empty body.
+    dumpGraph(`POST ${replyAll ? 'replyAll' : 'reply'}`, sendResp.status, sendResp.headers, sendResp.data);
   } catch (err) {
     const status = err.response?.status;
     const graphErr = err.response?.data?.error;
     const detail = graphErr?.message || graphErr?.code || err.message;
+    dumpGraph(`POST ${replyAll ? 'replyAll' : 'reply'} (error)`, status, err.response?.headers, err.response?.data);
     console.error(`[mcpBridge] /reply failed (${status || '?'}): ${detail}`);
     return res.status(502).json({
       ok: false,
@@ -409,34 +444,40 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
     });
   }
 
-  // Best-effort lookup of the new sent message so we can return its ID
-  // for further chaining (e.g. reply to a reply).
+  // Recover the new sent message's ids for further chaining (reply to a
+  // reply). Same poll-with-backoff as /send-email to beat Sent-Items
+  // indexing lag. Reply subjects are "Re: <original>" — Outlook adds the
+  // prefix. For replyAll we don't know the exact To line, so we don't
+  // filter by recipient and just take the most recent matching subject.
   let lookedUp = null;
-  try {
-    // Reply subjects are "Re: <original>" — Outlook adds the prefix.
-    const replySubject = originalSubject
-      ? (originalSubject.toLowerCase().startsWith('re:') ? originalSubject : `Re: ${originalSubject}`)
-      : null;
-    if (replySubject) {
-      // For replyAll we don't know exactly who'll be on the To line,
-      // so skip the toEmail filter — pick the most recent matching subject.
-      const sinceIso = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-      const esc = replySubject.replace(/'/g, "''");
-      const res2 = await axios.get(
-        `https://graph.microsoft.com/v1.0/me/mailFolders/sentitems/messages` +
-        `?$top=5&$orderby=sentDateTime desc` +
-        `&$select=id,internetMessageId,conversationId,sentDateTime` +
-        `&$filter=sentDateTime ge ${sinceIso} and subject eq '${esc}'`,
-        { headers: { Authorization: `Bearer ${token.accessToken}` }, timeout: 10000 }
-      );
-      lookedUp = (res2.data?.value || [])[0] || null;
+  let lookupError = null;
+  const replySubject = originalSubject
+    ? (originalSubject.toLowerCase().startsWith('re:') ? originalSubject : `Re: ${originalSubject}`)
+    : null;
+  if (replySubject) {
+    try {
+      const { message: found, attempts, lastError } = await pollSentMessage({
+        accessToken: token.accessToken,
+        toEmail: undefined, // subject-only match; replyAll recipients are unknown here
+        subject: replySubject,
+        sinceIso,
+        debug: GRAPH_DEBUG,
+      });
+      lookedUp = found;
+      lookupError = lastError;
+      if (GRAPH_DEBUG) console.error(`[mcpBridge] reply sent-items poll: ${found ? 'hit' : 'miss'} after ${attempts} attempt(s)`);
+    } catch (err) {
+      lookupError = err.message;
+      console.warn(`[mcpBridge] reply sent ok but Sent Items poll failed: ${err.message}`);
     }
-  } catch (err) {
-    console.warn(`[mcpBridge] reply sent ok but Sent Items lookup failed: ${err.message}`);
   }
 
   const elapsedMs = Date.now() - startedAt;
-  console.log(`[mcpBridge] ${replyAll ? 'replyAll' : 'reply'} ${cred.email} → message ${graphMessageId} in ${elapsedMs}ms`);
+  const captured = !!lookedUp?.id;
+  console.log(
+    `[mcpBridge] ${replyAll ? 'replyAll' : 'reply'} ${cred.email} → message ${graphMessageId} in ${elapsedMs}ms` +
+    ` — newMessageId ${captured ? 'captured' : 'NOT captured'}`
+  );
   return res.json({
     ok: true,
     status: 'sent',
@@ -447,7 +488,16 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
     includedOriginalBody: !!includeOriginalBody && !!originalQuoteHtml,
     messageId:         lookedUp?.id || null,
     internetMessageId: lookedUp?.internetMessageId || null,
+    // conversationId is reliable even on a lookup miss: the reply inherits
+    // the original's conversation, which we already fetched above.
     conversationId:    lookedUp?.conversationId || originalConversationId || null,
+    ...(captured ? {} : {
+      warning:
+        'Reply was sent and threaded correctly, but the new messageId could not be read back ' +
+        'from Sent Items in time (Graph indexing lag). Chaining a further reply onto THIS message ' +
+        'may require recovering its id later via scripts/recoverSentIds.js.' +
+        (lookupError ? ` Lookup error: ${lookupError}` : ''),
+    }),
     elapsedMs,
   });
 });

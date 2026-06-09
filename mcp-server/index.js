@@ -118,6 +118,7 @@ export async function runSendEmail({ to, subject, body, cc, bcc, from }) {
       ...(result.messageId
         ? ['', 'To send a threaded reply later, pass the messageId above as inReplyToMessageId to reply_to_email.']
         : []),
+      ...(result.warning ? ['', `⚠️  ${result.warning}`] : []),
     ];
     return { isError: false, text: lines.join('\n') };
   }
@@ -167,6 +168,7 @@ export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc,
       ...(result.conversationId    ? [`   convoId:        ${result.conversationId}`]    : []),
       `   includedQuote:  ${result.includedOriginalBody ? 'yes' : 'no'}`,
       `   latency:        ${result.elapsedMs}ms`,
+      ...(result.warning ? ['', `⚠️  ${result.warning}`] : []),
     ];
     return { isError: false, text: lines.join('\n') };
   }
