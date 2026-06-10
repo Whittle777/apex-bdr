@@ -29,6 +29,7 @@ const mcpBridgeRouter = require('./routes/mcpBridge');
 const cron = require('node-cron');
 const { runDueSequenceEmails, prepareUpcomingDrafts } = require('./services/sequenceMailer');
 const { runReplyDetection } = require('./services/replyDetector');
+const { drainQueue } = require('./services/sendQueueWorker');
 
 const http = require('http');
 const app = express();
@@ -131,6 +132,21 @@ cron.schedule('*/10 * * * *', async () => {
     await runReplyDetection();
   } catch (err) {
     console.error('[Reply Detector] Cron error:', err.message);
+  }
+});
+
+// ── Paced send-queue worker ──────────────────────────────────────────────────
+// Runs every minute — drains OutboundQueue at the configured pace (3–4 min ±
+// jitter) inside the send window (8am–5pm PT), under the day's cap, halting if
+// the day is gated `abort`. Sends at most one message per user per tick, so the
+// per-minute cron naturally produces the multi-minute spacing. Disable with
+// SEND_QUEUE_ENABLED=0.
+cron.schedule('* * * * *', async () => {
+  try {
+    const r = await drainQueue();
+    if (r && r.sent > 0) console.log(`[Send Queue] drained ${r.sent} message(s)`);
+  } catch (err) {
+    console.error('[Send Queue] Cron error:', err.message);
   }
 });
 

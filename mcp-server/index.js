@@ -45,24 +45,31 @@ const isEmail = (s) => ok(s) && EMAIL_RE.test(s.trim());
  * lives in this process. AbortController gives us a hard timeout
  * independent of the OS TCP settings.
  */
-async function callBridge(path, params) {
+async function callBridge(path, params, method = 'POST') {
   if (!BRIDGE_TOKEN) {
     return {
       ok: false,
       error: 'MCP_BRIDGE_TOKEN is not set on this MCP server process. Configure it in claude_desktop_config.json.',
     };
   }
-  const url = `${BRIDGE_URL}${path}`;
+  let url = `${BRIDGE_URL}${path}`;
+  const isGet = method === 'GET';
+  if (isGet && params && Object.keys(params).length) {
+    const qs = new URLSearchParams(
+      Object.fromEntries(Object.entries(params).filter(([, v]) => v != null))
+    ).toString();
+    if (qs) url += `?${qs}`;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     const resp = await fetch(url, {
-      method: 'POST',
+      method,
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${BRIDGE_TOKEN}`,
       },
-      body: JSON.stringify(params),
+      ...(isGet ? {} : { body: JSON.stringify(params) }),
       signal: controller.signal,
     });
     const data = await resp.json().catch(() => ({}));
@@ -179,6 +186,102 @@ export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc,
   };
 }
 
+/**
+ * Enqueue an email for PACED sending. Unlike send_email, this does not send
+ * immediately — it adds the message to the connector's send queue, which
+ * drains at a human pace (every few minutes) inside the send window and under
+ * the day's cap. Use for batches so the mailbox doesn't burst-send. Optional
+ * inReplyToMessageId makes it a paced threaded reply.
+ */
+export async function runEnqueueEmail({
+  to, subject, body, cc, bcc, from,
+  inReplyToMessageId, replyAll, includeOriginalBody,
+  batchId, scheduledFor, dailyCap, gate,
+}) {
+  const isReply = ok(inReplyToMessageId);
+  const errors = [];
+  if (isReply) {
+    if (!ok(body)) errors.push('"body" is required');
+  } else {
+    if (!isEmail(to)) errors.push('"to" must be a valid email address');
+    if (!ok(subject)) errors.push('"subject" is required and must be non-empty');
+    if (!ok(body)) errors.push('"body" is required and must be non-empty');
+  }
+  if (cc && !isEmail(cc)) errors.push('"cc" must be a valid email if provided');
+  if (bcc && !isEmail(bcc)) errors.push('"bcc" must be a valid email if provided');
+  if (from && !isEmail(from)) errors.push('"from" must be a valid email if provided');
+  if (gate != null && !['proceed', 'warning', 'abort'].includes(gate)) errors.push('"gate" must be proceed | warning | abort');
+  if (errors.length > 0) {
+    return { isError: true, text: `❌ Input validation failed:\n - ${errors.join('\n - ')}` };
+  }
+
+  log(`enqueue_email: → ${isReply ? `reply ${inReplyToMessageId.slice(0, 30)}…` : to}, batch=${batchId || '-'}`);
+  const result = await callBridge('/api/mcp/enqueue-email', {
+    to, subject, body, cc, bcc, from,
+    inReplyToMessageId, replyAll: !!replyAll, includeOriginalBody: includeOriginalBody !== false,
+    batchId, scheduledFor, dailyCap, gate,
+  });
+  if (result.ok) {
+    const lines = [
+      '🕒 Queued (paced send — not sent immediately).',
+      `   trackingId:     ${result.trackingId}`,
+      `   from:           ${result.from}`,
+      ...(result.to ? [`   to:             ${result.to}`] : []),
+      ...(result.isReply ? ['   type:           threaded reply'] : []),
+      ...(result.batchId ? [`   batch:          ${result.batchId}`] : []),
+      `   queuePosition:  ${result.queuePosition}`,
+      ...(result.estimatedSendAt ? [`   est. send:      ${result.estimatedSendAt} (approx)`] : []),
+      '',
+      'The worker paces sends inside the send window under the day\'s cap; gate=abort halts the day.',
+      'Poll status with check_email_queue (by batchId or trackingId) to get the messageId once sent.',
+    ];
+    return { isError: false, text: lines.join('\n') };
+  }
+  warn('enqueue failed:', result.error);
+  return {
+    isError: true,
+    text: `❌ Enqueue failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}`,
+  };
+}
+
+/**
+ * Check the paced send queue — by batchId (a whole batch) or trackingId (one
+ * item). Returns each item's status and, once sent, its messageId /
+ * internetMessageId / conversationId so the caller can reconcile.
+ */
+export async function runCheckEmailQueue({ batchId, trackingId, status }) {
+  if (trackingId) {
+    const r = await callBridge(`/api/mcp/queue/${encodeURIComponent(trackingId)}`, null, 'GET');
+    if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
+    const it = r.item || {};
+    return {
+      isError: false,
+      text: [
+        `Queue item ${trackingId}:`,
+        `   status:     ${it.status}`,
+        ...(it.to ? [`   to:         ${it.to}`] : []),
+        ...(it.messageId ? [`   messageId:  ${it.messageId}`] : []),
+        ...(it.internetMessageId ? [`   inetMsgId:  ${it.internetMessageId}`] : []),
+        ...(it.conversationId ? [`   convoId:    ${it.conversationId}`] : []),
+        ...(it.failureReason ? [`   note:       ${it.failureReason}`] : []),
+      ].join('\n'),
+    };
+  }
+
+  const r = await callBridge('/api/mcp/queue', { batchId, status }, 'GET');
+  if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
+  const counts = Object.entries(r.counts || {}).map(([k, v]) => `${k}=${v}`).join(' ') || '(none)';
+  const lines = [
+    `Queue${batchId ? ` (batch ${batchId})` : ''}: ${r.total} item(s) — ${counts}`,
+    ...r.items.slice(0, 50).map((it) => {
+      const id = it.messageId ? ` msgId=${it.messageId.slice(0, 24)}…` : '';
+      return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${id}`;
+    }),
+    ...(r.items.length > 50 ? [`   …and ${r.items.length - 50} more`] : []),
+  ];
+  return { isError: false, text: lines.join('\n') };
+}
+
 // ──────────────────────────────────────────────────────────────────────
 // MCP wiring
 // ──────────────────────────────────────────────────────────────────────
@@ -267,6 +370,63 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['inReplyToMessageId', 'body'],
       },
     },
+    {
+      name: 'enqueue_email',
+      description: [
+        'Enqueue an email for PACED sending through the apex-bdr app (Outlook).',
+        'Unlike send_email, this does NOT send immediately — it adds the message',
+        'to a server-side queue that drains at a human pace (every few minutes),',
+        'only inside the send window (8am–5pm PT), with jitter, and never beyond',
+        "the day's cap. Use this for BATCHES so the mailbox doesn't burst-send",
+        '(bursting is a top deliverability/spam trigger).',
+        '',
+        'Set inReplyToMessageId to enqueue a paced threaded reply instead of a new',
+        'send. Pass dailyCap and gate (computed from Send Health) to set the day\'s',
+        'policy: gate="abort" (CRITICAL) halts the whole day; cap limits volume.',
+        '',
+        'Returns a trackingId. Poll check_email_queue (by batchId or trackingId) to',
+        'get each message\'s status and messageId once it actually sends.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          to: { type: 'string', description: 'Recipient email (required for a new send; omit for a reply).' },
+          subject: { type: 'string', description: 'Subject (required for a new send).' },
+          body: { type: 'string', description: 'Email body. Plain text OR HTML; bare URLs and markdown links become clickable.' },
+          cc: { type: 'string', description: 'Optional CC address.' },
+          bcc: { type: 'string', description: 'Optional BCC address.' },
+          from: { type: 'string', description: 'Optional. Pick a connected Microsoft account. Ignored under a per-user token.' },
+          inReplyToMessageId: { type: 'string', description: 'If set, this is a paced threaded reply to that message (Graph id or internetMessageId).' },
+          replyAll: { type: 'boolean', description: 'Reply to all (only when inReplyToMessageId is set). Default false.' },
+          includeOriginalBody: { type: 'boolean', description: 'Quote the original below the reply (only for replies). Default true.' },
+          batchId: { type: 'string', description: 'Group this send with the rest of today\'s batch (for status polling/reconciliation).' },
+          scheduledFor: { type: 'string', description: 'Optional ISO timestamp — earliest time this may send (still subject to pacing/window/cap).' },
+          dailyCap: { type: 'integer', description: 'Max messages to send today for this inbox (from Send Health Daily Cap). Sets the day\'s policy.' },
+          gate: { type: 'string', enum: ['proceed', 'warning', 'abort'], description: 'Day gate from Send Health Status. abort=halt the day (CRITICAL); warning/proceed=send (cap encodes WARNING).' },
+        },
+        required: ['body'],
+      },
+    },
+    {
+      name: 'check_email_queue',
+      description: [
+        'Check the paced send queue. Pass batchId to see a whole batch, or',
+        'trackingId for one item. Returns each item\'s status (queued/sending/sent/',
+        'failed/cancelled) and, once sent, its messageId / internetMessageId /',
+        'conversationId so you can reconcile (e.g. write the Email Log / Send',
+        'Health) and thread follow-ups.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          batchId: { type: 'string', description: 'Show all items in this batch.' },
+          trackingId: { type: 'string', description: 'Show a single item by its tracking id.' },
+          status: { type: 'string', description: 'Optional filter: queued | sending | sent | failed | cancelled.' },
+        },
+      },
+    },
   ],
 }));
 
@@ -277,6 +437,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     outcome = await runSendEmail(args || {});
   } else if (name === 'reply_to_email') {
     outcome = await runReplyToEmail(args || {});
+  } else if (name === 'enqueue_email') {
+    outcome = await runEnqueueEmail(args || {});
+  } else if (name === 'check_email_queue') {
+    outcome = await runCheckEmailQueue(args || {});
   } else {
     return {
       isError: true,
