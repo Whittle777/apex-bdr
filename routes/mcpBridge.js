@@ -1,56 +1,42 @@
 /**
- * MCP bridge — single endpoint the local Claude Desktop MCP server calls
- * to send ad-hoc emails through this app's existing Microsoft 365
- * integration. No new Outlook auth path; this just wraps the
- * already-trusted send pipeline so Claude Desktop can reach it without
- * touching Outlook directly.
+ * MCP bridge — endpoints the local Claude Desktop / Cowork MCP server calls
+ * to send mail through this app's existing Microsoft 365 integration. No new
+ * Outlook auth path; this wraps the already-trusted send pipeline.
  *
- * Auth: Bearer <MCP_BRIDGE_TOKEN>. When the env var is missing, the
- * endpoint refuses with 503 — the feature is off by default.
+ * Two send modes:
+ *   - Immediate:  POST /send-email, POST /reply-email — fire now, return the
+ *                 result (incl. messageId via poll-with-backoff). For ad-hoc
+ *                 one-off sends.
+ *   - Paced:      POST /enqueue-email — enqueue into OutboundQueue; the
+ *                 sendQueueWorker drains it at a human pace inside the send
+ *                 window, under the day's cap, honoring the gate. For batches.
  *
- * No public-facing changes to the rest of the app: this is a separate
- * route file mounted at /api/mcp, completely additive.
+ * The Graph send/reply core lives in services/bridgeMailer.js so the routes
+ * and the worker share one implementation.
+ *
+ * Auth: Bearer per-user token (apexbdr_…) or the legacy shared
+ * MCP_BRIDGE_TOKEN. Mounted at /api/mcp, completely additive.
  */
 const express = require('express');
-const axios = require('axios');
 const crypto = require('crypto');
 const router = express.Router();
 
 const prisma = require('../services/database');
-const { getMicrosoftAccessToken, linkify } = require('../services/sequenceMailer');
-const { pollSentMessage } = require('../services/graphSentLookup');
+const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
+const { sendEmailViaGraph, sendReplyViaGraph } = require('../services/bridgeMailer');
+const { localDateString, getConfig } = require('../services/sendPacing');
 
-// Gate raw Graph request/response dumps behind an env flag so we can
-// diagnose capture failures in the field without spamming logs by default.
-// Set MCP_DEBUG_GRAPH=1 to enable. Dumps go to stderr.
-const GRAPH_DEBUG = process.env.MCP_DEBUG_GRAPH === '1';
-const dumpGraph = (label, status, headers, body) => {
-  if (!GRAPH_DEBUG) return;
-  console.error(`[mcpBridge][raw] ${label} → status=${status ?? '?'}`);
-  if (headers) console.error(`[mcpBridge][raw] ${label} headers=`, JSON.stringify(headers));
-  console.error(`[mcpBridge][raw] ${label} body=`, JSON.stringify(body ?? null, null, 2)?.slice(0, 4000));
-};
-
-// Loose RFC 5322-ish check — good enough to catch obvious typos. We
-// don't try to be a full RFC parser.
+// Loose RFC 5322-ish check — good enough to catch obvious typos.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
 const ok = (s) => typeof s === 'string' && s.trim().length > 0;
 const isEmail = (s) => ok(s) && EMAIL_RE.test(s.trim());
 
 const hashToken = (plain) => crypto.createHash('sha256').update(plain).digest('hex');
 const isApexUserToken = (s) => typeof s === 'string' && s.startsWith('apexbdr_');
 
-// Auth middleware. Two accepted forms:
-//   (a) Per-user token  — Bearer apexbdr_…  → identifies the user; the
-//       bridge will use THIS user's Microsoft account by default.
-//   (b) Legacy shared token — Bearer <MCP_BRIDGE_TOKEN env value>  →
-//       single-account mode; bridge picks the first connected Microsoft
-//       credential. Backward-compatible with the original setup.
-//
-// At least one of the two must be configured. If neither MCP_BRIDGE_TOKEN
-// is set NOR any User has an mcpTokenHash, the endpoint is effectively
-// off (503).
+// Auth middleware. (a) per-user token apexbdr_… identifies the user and uses
+// THAT user's Microsoft account; (b) legacy shared MCP_BRIDGE_TOKEN picks the
+// first connected Microsoft credential. If neither is configured → 503.
 async function requireBridgeAuth(req, res, next) {
   const auth = req.headers.authorization || '';
   const provided = auth.startsWith('Bearer ') ? auth.slice(7) : '';
@@ -58,11 +44,9 @@ async function requireBridgeAuth(req, res, next) {
     return res.status(401).json({ ok: false, error: 'Missing Authorization: Bearer <token>' });
   }
 
-  // (a) Per-user token path
   if (isApexUserToken(provided)) {
     try {
-      const hash = hashToken(provided);
-      const user = await prisma.user.findFirst({ where: { mcpTokenHash: hash } });
+      const user = await prisma.user.findFirst({ where: { mcpTokenHash: hashToken(provided) } });
       if (user) {
         req.mcpUser = user;
         return next();
@@ -74,7 +58,6 @@ async function requireBridgeAuth(req, res, next) {
     return res.status(401).json({ ok: false, error: 'Invalid per-user MCP token' });
   }
 
-  // (b) Legacy shared token path
   const expected = process.env.MCP_BRIDGE_TOKEN;
   if (!expected) {
     return res.status(503).json({
@@ -88,418 +71,293 @@ async function requireBridgeAuth(req, res, next) {
   next();
 }
 
-// GET /api/mcp/health — unauth'd liveness so the MCP server can confirm
-// the bridge is reachable before relaying a tool call.
-router.get('/health', (req, res) => {
-  res.json({
-    ok: true,
-    bridgeEnabled: !!process.env.MCP_BRIDGE_TOKEN,
+// Resolve the sending Microsoft credential. Per-user token → that user;
+// shared token → `from` if given, else first connected. Returns cred|null.
+async function resolveCred(req, from) {
+  if (req.mcpUser) {
+    return prisma.integrationCredential.findUnique({
+      where: { provider_userId: { provider: 'microsoft', userId: req.mcpUser.id } },
+    });
+  }
+  return prisma.integrationCredential.findFirst({
+    where: { provider: 'microsoft', ...(from ? { email: from } : {}) },
+    orderBy: { id: 'asc' },
   });
+}
+function credError(req, from) {
+  if (req.mcpUser) return `User ${req.mcpUser.email} has not connected a Microsoft 365 account yet. Sign in with Microsoft in Integrations first.`;
+  if (from) return `No Microsoft 365 credential found for "${from}"`;
+  return 'No Microsoft 365 account is connected. Open the app and sign in with Microsoft first.';
+}
+
+const CAPTURE_WARNING =
+  'Email was sent, but its messageId could not be read back from Sent Items in time (Graph indexing lag). ' +
+  'Threading a reply may require recovering the id later via scripts/recoverSentIds.js.';
+
+// GET /api/mcp/health — unauth'd liveness.
+router.get('/health', (req, res) => {
+  res.json({ ok: true, bridgeEnabled: !!process.env.MCP_BRIDGE_TOKEN });
 });
 
-// POST /api/mcp/send-email
-// Body: { to, subject, body, cc?, bcc?, from? }
-// Returns 200 { ok: true, ... } on success, 4xx/5xx { ok: false, error } otherwise.
+// POST /api/mcp/send-email — immediate one-off send. Body: { to, subject, body, cc?, bcc?, from? }
 router.post('/send-email', requireBridgeAuth, async (req, res) => {
-  const startedAt = Date.now();
   const { to, subject, body, cc, bcc, from } = req.body || {};
 
-  // ── Validate ────────────────────────────────────────────────────────────
-  if (!isEmail(to))   return res.status(400).json({ ok: false, error: '"to" must be a valid email' });
-  if (!ok(subject))   return res.status(400).json({ ok: false, error: '"subject" is required' });
-  if (!ok(body))      return res.status(400).json({ ok: false, error: '"body" is required' });
-  if (cc  && !isEmail(cc))  return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
+  if (!isEmail(to)) return res.status(400).json({ ok: false, error: '"to" must be a valid email' });
+  if (!ok(subject)) return res.status(400).json({ ok: false, error: '"subject" is required' });
+  if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
+  if (cc && !isEmail(cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
   if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
 
-  // ── Pick the sending account ────────────────────────────────────────────
-  // Priority:
-  //   1. If a per-user token authed this call → use THAT user's Microsoft
-  //      credential. Each teammate sends from their own Outlook. The
-  //      `from` arg is ignored in this mode to prevent impersonation.
-  //   2. Else (legacy shared-token path): use `from` if provided to pick
-  //      a specific account; otherwise the first connected one.
   let cred;
   try {
-    if (req.mcpUser) {
-      cred = await prisma.integrationCredential.findUnique({
-        where: { provider_userId: { provider: 'microsoft', userId: req.mcpUser.id } },
-      });
-    } else {
-      cred = await prisma.integrationCredential.findFirst({
-        where: { provider: 'microsoft', ...(from ? { email: from } : {}) },
-        orderBy: { id: 'asc' },
-      });
-    }
+    cred = await resolveCred(req, from);
   } catch (err) {
-    console.error('[mcpBridge] credential lookup failed:', err.message);
     return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
   }
-  if (!cred) {
-    return res.status(412).json({
-      ok: false,
-      error: req.mcpUser
-        ? `User ${req.mcpUser.email} has not connected a Microsoft 365 account yet. Sign in with Microsoft in Integrations first.`
-        : from
-        ? `No Microsoft 365 credential found for "${from}"`
-        : 'No Microsoft 365 account is connected. Open the app and sign in with Microsoft first.',
-    });
-  }
+  if (!cred) return res.status(412).json({ ok: false, error: credError(req, from) });
 
-  // ── Refresh access token ────────────────────────────────────────────────
   let token;
   try {
     token = await getMicrosoftAccessToken(cred.userId);
   } catch (err) {
-    console.error('[mcpBridge] token refresh failed:', err.message);
     return res.status(502).json({ ok: false, error: `Microsoft token refresh failed: ${err.message}` });
   }
 
-  // ── Format body ─────────────────────────────────────────────────────────
-  // Linkify markdown / bare URLs. Plain-text bodies get \n → <br/>; HTML
-  // bodies are passed through. Same heuristic the sequence mailer uses.
-  const linkedBody = linkify(body);
-  const HTML_TAG = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i;
-  const htmlBody = HTML_TAG.test(linkedBody)
-    ? linkedBody
-    : linkedBody.replace(/\n/g, '<br/>');
-
-  // ── Build and send ──────────────────────────────────────────────────────
-  const message = {
-    subject,
-    body: { contentType: 'HTML', content: htmlBody },
-    toRecipients:  [{ emailAddress: { address: to } }],
-    ...(cc  ? { ccRecipients:  [{ emailAddress: { address: cc } }]  } : {}),
-    ...(bcc ? { bccRecipients: [{ emailAddress: { address: bcc } }] } : {}),
-  };
-
-  // Window for the post-send Sent-Items lookup starts just before we fire
-  // the send, so the poll filter (sentDateTime ge sinceIso) can't exclude
-  // the message we're about to send.
-  const sinceIso = new Date(Date.now() - 60 * 1000).toISOString();
-
   try {
-    const sendResp = await axios.post(
-      'https://graph.microsoft.com/v1.0/me/sendMail',
-      { message, saveToSentItems: true },
-      {
-        headers: { Authorization: `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-        timeout: 15000,
-      }
-    );
-    // sendMail returns 202 Accepted with an EMPTY body — there is no id to
-    // capture here. That is the whole reason we poll Sent Items below.
-    dumpGraph('POST /me/sendMail', sendResp.status, sendResp.headers, sendResp.data);
-  } catch (err) {
-    const status = err.response?.status;
-    const graphErr = err.response?.data?.error;
-    const detail = graphErr?.message || graphErr?.code || err.message;
-    dumpGraph('POST /me/sendMail (error)', status, err.response?.headers, err.response?.data);
-    console.error(`[mcpBridge] /me/sendMail failed (${status || '?'}): ${detail}`);
-    return res.status(502).json({
-      ok: false,
-      error: `Microsoft Graph rejected the send (status ${status || '?'}): ${detail}`,
-    });
-  }
-
-  // Read the just-sent message back from Sent Items to recover its Graph
-  // message ID + internetMessageId + conversationId. Callers (e.g.
-  // reply_to_email) need a durable id to thread follow-ups.
-  //
-  // sendMail's 202 fires before the message is indexed in Sent Items, so a
-  // single immediate query almost always misses (that was the original
-  // bug). pollSentMessage retries with backoff over ~7s until it appears.
-  // This stays on the existing Mail.Read scope — no Mail.ReadWrite needed.
-  let lookedUp = null;
-  let lookupError = null;
-  try {
-    const { message: found, attempts, lastError } = await pollSentMessage({
-      accessToken: token.accessToken,
-      toEmail: to,
+    const r = await sendEmailViaGraph({ accessToken: token.accessToken, to, subject, body, cc, bcc });
+    console.log(`[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${r.elapsedMs}ms — messageId ${r.captured ? 'captured' : 'NOT captured'}`);
+    return res.json({
+      ok: true,
+      status: 'sent',
+      from: cred.email,
+      to,
+      cc: cc || null,
+      bcc: bcc || null,
       subject,
-      sinceIso,
-      debug: GRAPH_DEBUG,
+      messageId: r.messageId,
+      internetMessageId: r.internetMessageId,
+      conversationId: r.conversationId,
+      ...(r.captured ? {} : { warning: CAPTURE_WARNING + (r.lookupError ? ` Lookup error: ${r.lookupError}` : '') }),
+      elapsedMs: r.elapsedMs,
     });
-    lookedUp = found;
-    lookupError = lastError;
-    if (GRAPH_DEBUG) console.error(`[mcpBridge] sent-items poll: ${found ? 'hit' : 'miss'} after ${attempts} attempt(s)`);
   } catch (err) {
-    lookupError = err.message;
-    console.warn(`[mcpBridge] sent ok but Sent Items poll failed: ${err.message}`);
+    return res.status(err.httpStatus || 502).json({ ok: false, error: err.message });
   }
-
-  const elapsedMs = Date.now() - startedAt;
-  const captured = !!lookedUp?.id;
-  console.log(
-    `[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${elapsedMs}ms` +
-    ` — messageId ${captured ? 'captured' : 'NOT captured'}`
-  );
-
-  // Consistent, machine-readable response shape. ids are ALWAYS present as
-  // keys (null when not recovered) so downstream code never has to guess.
-  // On a miss we add an explicit `warning` so callers can detect it and
-  // fall back to the recovery utility rather than silently getting nothing.
-  return res.json({
-    ok: true,
-    status: 'sent',
-    from: cred.email,
-    to,
-    cc: cc || null,
-    bcc: bcc || null,
-    subject,
-    messageId:         lookedUp?.id || null,
-    internetMessageId: lookedUp?.internetMessageId || null,
-    conversationId:    lookedUp?.conversationId || null,
-    ...(captured ? {} : {
-      warning:
-        'Email was sent, but its messageId could not be read back from Sent Items in time ' +
-        '(Graph indexing lag). Threading a reply to this message may require recovering the id ' +
-        'later via the Sent-Items recovery utility (scripts/recoverSentIds.js).' +
-        (lookupError ? ` Lookup error: ${lookupError}` : ''),
-    }),
-    elapsedMs,
-  });
 });
 
-/**
- * Resolve a Graph message ID. Accepts:
- *   - Graph resource ID (long opaque string, the usual format), returned as-is
- *   - RFC 5322 internetMessageId (contains "@", often wrapped in <…>), looked
- *     up via $filter against the user's mail
- * Returns null if no match is found.
- */
-async function resolveGraphMessageId(accessToken, inReplyTo) {
-  if (!inReplyTo) return null;
-  // Internet Message-IDs are RFC 5322 — contain @ and often wrapped in <…>.
-  // Graph resource IDs are base64-ish and don't contain @.
-  if (inReplyTo.includes('@')) {
-    const esc = inReplyTo.replace(/'/g, "''");
-    const res = await axios.get(
-      `https://graph.microsoft.com/v1.0/me/messages?$top=1&$select=id&$filter=internetMessageId eq '${esc}'`,
-      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
-    );
-    return res.data?.value?.[0]?.id || null;
-  }
-  // Otherwise treat as Graph ID and confirm by HEAD-ish GET.
-  try {
-    const res = await axios.get(
-      `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(inReplyTo)}?$select=id`,
-      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
-    );
-    return res.data?.id || null;
-  } catch {
-    return null;
-  }
-}
-
-// POST /api/mcp/reply-email
-// True RFC 5322 threaded reply. Uses the Graph /reply (or /replyAll)
-// endpoint with message.body override, so threading + In-Reply-To +
-// References + conversationId are all handled by Graph. No Mail.ReadWrite
-// needed; works with the existing Mail.Send + Mail.Read scopes.
-//
-// Body: {
-//   inReplyToMessageId: string,   // Graph message ID or RFC 5322 Message-ID
-//   body: string,
-//   from?: string,                // ignored when authed via per-user token
-//   cc?: string,
-//   bcc?: string,
-//   replyAll?: boolean,           // default false
-//   includeOriginalBody?: boolean // default true; appends original below new content
-// }
+// POST /api/mcp/reply-email — immediate threaded reply.
+// Body: { inReplyToMessageId, body, from?, cc?, bcc?, replyAll?, includeOriginalBody? }
 router.post('/reply-email', requireBridgeAuth, async (req, res) => {
-  const startedAt = Date.now();
-  const {
-    inReplyToMessageId, body, from, cc, bcc,
-    replyAll = false, includeOriginalBody = true,
-  } = req.body || {};
+  const { inReplyToMessageId, body, from, cc, bcc, replyAll = false, includeOriginalBody = true } = req.body || {};
 
-  // ── Validate ────────────────────────────────────────────────────────────
   if (!ok(inReplyToMessageId)) return res.status(400).json({ ok: false, error: '"inReplyToMessageId" is required' });
-  if (!ok(body))               return res.status(400).json({ ok: false, error: '"body" is required' });
-  if (cc  && !isEmail(cc))     return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
-  if (bcc && !isEmail(bcc))    return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
-  if (from && !isEmail(from))  return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
+  if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
+  if (cc && !isEmail(cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
+  if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
+  if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
 
-  // ── Pick the sending account (same rules as /send-email) ────────────────
   let cred;
   try {
-    if (req.mcpUser) {
-      cred = await prisma.integrationCredential.findUnique({
-        where: { provider_userId: { provider: 'microsoft', userId: req.mcpUser.id } },
-      });
-    } else {
-      cred = await prisma.integrationCredential.findFirst({
-        where: { provider: 'microsoft', ...(from ? { email: from } : {}) },
-        orderBy: { id: 'asc' },
-      });
-    }
+    cred = await resolveCred(req, from);
   } catch (err) {
-    console.error('[mcpBridge] credential lookup failed:', err.message);
     return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
   }
-  if (!cred) {
-    return res.status(412).json({
-      ok: false,
-      error: req.mcpUser
-        ? `User ${req.mcpUser.email} has not connected a Microsoft 365 account yet.`
-        : 'No Microsoft 365 account is connected.',
-    });
-  }
+  if (!cred) return res.status(412).json({ ok: false, error: credError(req, from) });
 
-  // ── Refresh access token ────────────────────────────────────────────────
   let token;
   try {
     token = await getMicrosoftAccessToken(cred.userId);
   } catch (err) {
-    console.error('[mcpBridge] token refresh failed:', err.message);
     return res.status(502).json({ ok: false, error: `Microsoft token refresh failed: ${err.message}` });
   }
 
-  // ── Resolve to a Graph message ID ───────────────────────────────────────
-  let graphMessageId;
   try {
-    graphMessageId = await resolveGraphMessageId(token.accessToken, inReplyToMessageId);
-  } catch (err) {
-    return res.status(502).json({ ok: false, error: `Failed to resolve inReplyToMessageId: ${err.message}` });
-  }
-  if (!graphMessageId) {
-    return res.status(404).json({
-      ok: false,
-      error: `Could not find a message matching "${inReplyToMessageId}" in this mailbox. Pass the Graph message ID returned by send_email, or the original message's internetMessageId.`,
+    const r = await sendReplyViaGraph({
+      accessToken: token.accessToken,
+      inReplyToMessageId,
+      body,
+      cc,
+      bcc,
+      replyAll: !!replyAll,
+      includeOriginalBody: includeOriginalBody !== false,
     });
+    console.log(`[mcpBridge] ${replyAll ? 'replyAll' : 'reply'} ${cred.email} → ${r.graphMessageId} in ${r.elapsedMs}ms — newMessageId ${r.captured ? 'captured' : 'NOT captured'}`);
+    return res.json({
+      ok: true,
+      status: 'sent',
+      threaded: true,
+      from: cred.email,
+      inReplyToMessageId: r.graphMessageId,
+      replyAll: !!replyAll,
+      includedOriginalBody: r.includedOriginalBody,
+      messageId: r.messageId,
+      internetMessageId: r.internetMessageId,
+      conversationId: r.conversationId,
+      ...(r.captured ? {} : { warning: 'Reply was sent and threaded correctly, but the new messageId could not be read back from Sent Items in time. ' + (r.lookupError ? `Lookup error: ${r.lookupError}` : '') }),
+      elapsedMs: r.elapsedMs,
+    });
+  } catch (err) {
+    return res.status(err.httpStatus || 502).json({ ok: false, error: err.message });
+  }
+});
+
+// POST /api/mcp/enqueue-email — paced send. Enqueues into OutboundQueue; the
+// worker drains at the configured pace/window/cap. Use for batches.
+// Body: { to, subject, body, cc?, bcc?, from?,
+//         inReplyToMessageId?, replyAll?, includeOriginalBody?,   // paced reply
+//         batchId?, scheduledFor?,                                // grouping / future-date
+//         dailyCap?, gate? }                                      // day policy (from Cowork/Send Health)
+router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
+  const {
+    to, subject, body, cc, bcc, from,
+    inReplyToMessageId, replyAll = false, includeOriginalBody = true,
+    batchId, scheduledFor, dailyCap, gate,
+  } = req.body || {};
+
+  const isReply = ok(inReplyToMessageId);
+  if (isReply) {
+    if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
+  } else {
+    if (!isEmail(to)) return res.status(400).json({ ok: false, error: '"to" must be a valid email' });
+    if (!ok(subject)) return res.status(400).json({ ok: false, error: '"subject" is required' });
+    if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
+  }
+  if (cc && !isEmail(cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
+  if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
+  if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
+  if (gate != null && !['proceed', 'warning', 'abort'].includes(gate)) {
+    return res.status(400).json({ ok: false, error: '"gate" must be one of: proceed | warning | abort' });
+  }
+  if (dailyCap != null && (!Number.isInteger(dailyCap) || dailyCap < 0)) {
+    return res.status(400).json({ ok: false, error: '"dailyCap" must be a non-negative integer' });
+  }
+  let scheduledForDate = null;
+  if (scheduledFor != null) {
+    scheduledForDate = new Date(scheduledFor);
+    if (Number.isNaN(scheduledForDate.getTime())) return res.status(400).json({ ok: false, error: '"scheduledFor" must be an ISO date' });
   }
 
-  // ── Optionally fetch original for quoting ───────────────────────────────
-  // When includeOriginalBody=true (default), we manually prepend the new
-  // content above the original. Graph's /reply with message.body override
-  // does NOT auto-append the original — only the `comment` flow does, and
-  // that's text-only. Doing it manually keeps full HTML control.
-  let originalQuoteHtml = '';
-  let originalSubject = null;
-  let originalConversationId = null;
-  if (includeOriginalBody) {
-    try {
-      const orig = await axios.get(
-        `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}` +
-        `?$select=subject,from,sentDateTime,conversationId,body`,
-        { headers: { Authorization: `Bearer ${token.accessToken}` }, timeout: 10000 }
-      );
-      const m = orig.data || {};
-      originalSubject = m.subject;
-      originalConversationId = m.conversationId;
-      const senderName  = m.from?.emailAddress?.name    || m.from?.emailAddress?.address || 'sender';
-      const senderEmail = m.from?.emailAddress?.address || '';
-      const sentAt = m.sentDateTime ? new Date(m.sentDateTime).toLocaleString() : '';
-      const origBodyHtml = m.body?.contentType?.toLowerCase() === 'html'
-        ? (m.body?.content || '')
-        : `<pre style="font-family: inherit; white-space: pre-wrap;">${(m.body?.content || '').replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>`;
-      originalQuoteHtml =
-        `<br><br>` +
-        `<div style="border-left: 2px solid #ccc; padding-left: 12px; color: #666;">` +
-        `<div style="font-size: 0.85em; margin-bottom: 6px;">On ${sentAt}, ${senderName}${senderEmail ? ` &lt;${senderEmail}&gt;` : ''} wrote:</div>` +
-        origBodyHtml +
-        `</div>`;
-    } catch (err) {
-      // Non-fatal — we'll send without quoting, log the reason.
-      console.warn(`[mcpBridge] couldn't fetch original for quoting: ${err.message}`);
-    }
+  let cred;
+  try {
+    cred = await resolveCred(req, from);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
   }
+  if (!cred) return res.status(412).json({ ok: false, error: credError(req, from) });
 
-  // ── Build the reply body ────────────────────────────────────────────────
-  const linkedBody = linkify(body);
-  const HTML_TAG = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i;
-  const newBodyHtml = HTML_TAG.test(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
-  const finalBodyHtml = newBodyHtml + originalQuoteHtml;
-
-  // ── Build the message override + send via /reply or /replyAll ───────────
-  const message = {
-    body: { contentType: 'HTML', content: finalBodyHtml },
-    ...(cc  ? { ccRecipients:  [{ emailAddress: { address: cc } }]  } : {}),
-    ...(bcc ? { bccRecipients: [{ emailAddress: { address: bcc } }] } : {}),
-  };
-  const endpoint = replyAll
-    ? `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}/replyAll`
-    : `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(graphMessageId)}/reply`;
-
-  // Window for the post-send lookup starts just before the reply fires.
-  const sinceIso = new Date(Date.now() - 60 * 1000).toISOString();
+  const cfg = getConfig();
+  const localDate = localDateString(new Date(), cfg.tz);
 
   try {
-    const sendResp = await axios.post(endpoint, { message }, {
-      headers: { Authorization: `Bearer ${token.accessToken}`, 'Content-Type': 'application/json' },
-      timeout: 15000,
-    });
-    // /reply and /replyAll also return 202 Accepted with an empty body.
-    dumpGraph(`POST ${replyAll ? 'replyAll' : 'reply'}`, sendResp.status, sendResp.headers, sendResp.data);
-  } catch (err) {
-    const status = err.response?.status;
-    const graphErr = err.response?.data?.error;
-    const detail = graphErr?.message || graphErr?.code || err.message;
-    dumpGraph(`POST ${replyAll ? 'replyAll' : 'reply'} (error)`, status, err.response?.headers, err.response?.data);
-    console.error(`[mcpBridge] /reply failed (${status || '?'}): ${detail}`);
-    return res.status(502).json({
-      ok: false,
-      error: `Microsoft Graph rejected the reply (status ${status || '?'}): ${detail}`,
-    });
-  }
-
-  // Recover the new sent message's ids for further chaining (reply to a
-  // reply). Same poll-with-backoff as /send-email to beat Sent-Items
-  // indexing lag. Reply subjects are "Re: <original>" — Outlook adds the
-  // prefix. For replyAll we don't know the exact To line, so we don't
-  // filter by recipient and just take the most recent matching subject.
-  let lookedUp = null;
-  let lookupError = null;
-  const replySubject = originalSubject
-    ? (originalSubject.toLowerCase().startsWith('re:') ? originalSubject : `Re: ${originalSubject}`)
-    : null;
-  if (replySubject) {
-    try {
-      const { message: found, attempts, lastError } = await pollSentMessage({
-        accessToken: token.accessToken,
-        toEmail: undefined, // subject-only match; replyAll recipients are unknown here
-        subject: replySubject,
-        sinceIso,
-        debug: GRAPH_DEBUG,
+    // Upsert today's policy from the cap/gate the caller (Cowork) computed
+    // from Send Health. Last-write-wins across a batch.
+    if (dailyCap != null || gate != null) {
+      await prisma.sendPolicy.upsert({
+        where: { userId_localDate: { userId: cred.userId, localDate } },
+        update: { ...(dailyCap != null ? { dailyCap } : {}), ...(gate != null ? { gate } : {}) },
+        create: { userId: cred.userId, localDate, dailyCap: dailyCap ?? cfg.defaultDailyCap, gate: gate ?? 'proceed' },
       });
-      lookedUp = found;
-      lookupError = lastError;
-      if (GRAPH_DEBUG) console.error(`[mcpBridge] reply sent-items poll: ${found ? 'hit' : 'miss'} after ${attempts} attempt(s)`);
-    } catch (err) {
-      lookupError = err.message;
-      console.warn(`[mcpBridge] reply sent ok but Sent Items poll failed: ${err.message}`);
     }
-  }
 
-  const elapsedMs = Date.now() - startedAt;
-  const captured = !!lookedUp?.id;
-  console.log(
-    `[mcpBridge] ${replyAll ? 'replyAll' : 'reply'} ${cred.email} → message ${graphMessageId} in ${elapsedMs}ms` +
-    ` — newMessageId ${captured ? 'captured' : 'NOT captured'}`
-  );
-  return res.json({
-    ok: true,
-    status: 'sent',
-    threaded: true,
-    from: cred.email,
-    inReplyToMessageId: graphMessageId,
-    replyAll: !!replyAll,
-    includedOriginalBody: !!includeOriginalBody && !!originalQuoteHtml,
-    messageId:         lookedUp?.id || null,
-    internetMessageId: lookedUp?.internetMessageId || null,
-    // conversationId is reliable even on a lookup miss: the reply inherits
-    // the original's conversation, which we already fetched above.
-    conversationId:    lookedUp?.conversationId || originalConversationId || null,
-    ...(captured ? {} : {
-      warning:
-        'Reply was sent and threaded correctly, but the new messageId could not be read back ' +
-        'from Sent Items in time (Graph indexing lag). Chaining a further reply onto THIS message ' +
-        'may require recovering its id later via scripts/recoverSentIds.js.' +
-        (lookupError ? ` Lookup error: ${lookupError}` : ''),
-    }),
-    elapsedMs,
-  });
+    const trackingId = `q_${crypto.randomUUID()}`;
+    const row = await prisma.outboundQueue.create({
+      data: {
+        userId: cred.userId,
+        trackingId,
+        to: to || '',
+        subject: subject || '',
+        body: body || '',
+        cc: cc || null,
+        bcc: bcc || null,
+        inReplyToMessageId: inReplyToMessageId || null,
+        replyAll: !!replyAll,
+        includeOriginalBody: includeOriginalBody !== false,
+        batchId: batchId || null,
+        scheduledFor: scheduledForDate,
+      },
+    });
+
+    const queuePosition = await prisma.outboundQueue.count({ where: { userId: cred.userId, status: 'queued' } });
+    const policy = await prisma.sendPolicy.findUnique({ where: { userId_localDate: { userId: cred.userId, localDate } } }).catch(() => null);
+    const avgPace = (cfg.paceMinMs + cfg.paceMaxMs) / 2;
+    const base = Math.max(Date.now(), policy?.nextEligibleAt ? new Date(policy.nextEligibleAt).getTime() : Date.now(), scheduledForDate ? scheduledForDate.getTime() : 0);
+    const estimatedSendAt = new Date(base + (queuePosition - 1) * avgPace); // rough — ignores window rollover
+
+    return res.json({
+      ok: true,
+      status: 'queued',
+      trackingId,
+      id: row.id,
+      from: cred.email,
+      to: to || null,
+      isReply,
+      batchId: batchId || null,
+      queuePosition,
+      estimatedSendAt: estimatedSendAt.toISOString(),
+      note: 'Queued. The worker paces sends within the send window under the day\'s cap; gate=abort halts the day. Poll GET /api/mcp/queue?batchId=… for status + messageId.',
+    });
+  } catch (err) {
+    console.error('[mcpBridge] enqueue failed:', err.message);
+    return res.status(500).json({ ok: false, error: `Enqueue failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/queue?batchId=&status=&date= — list queue items (for reconciliation).
+router.get('/queue', requireBridgeAuth, async (req, res) => {
+  const { batchId, status } = req.query || {};
+  const where = {
+    ...(req.mcpUser ? { userId: req.mcpUser.id } : {}),
+    ...(batchId ? { batchId: String(batchId) } : {}),
+    ...(status ? { status: String(status) } : {}),
+  };
+  try {
+    const items = await prisma.outboundQueue.findMany({
+      where,
+      orderBy: { createdAt: 'asc' },
+      select: {
+        trackingId: true, to: true, subject: true, status: true, batchId: true,
+        inReplyToMessageId: true, scheduledFor: true, sentAt: true,
+        messageId: true, internetMessageId: true, conversationId: true,
+        attempts: true, failureReason: true, createdAt: true,
+      },
+    });
+    const counts = items.reduce((acc, it) => ((acc[it.status] = (acc[it.status] || 0) + 1), acc), {});
+    return res.json({ ok: true, total: items.length, counts, items });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/queue/:trackingId — single item status.
+router.get('/queue/:trackingId', requireBridgeAuth, async (req, res) => {
+  try {
+    const item = await prisma.outboundQueue.findUnique({ where: { trackingId: req.params.trackingId } });
+    if (!item || (req.mcpUser && item.userId !== req.mcpUser.id)) {
+      return res.status(404).json({ ok: false, error: 'No queue item with that trackingId' });
+    }
+    return res.json({ ok: true, item });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
+  }
+});
+
+// PATCH /api/mcp/queue/:trackingId/cancel — cancel a still-queued item.
+router.patch('/queue/:trackingId/cancel', requireBridgeAuth, async (req, res) => {
+  try {
+    const item = await prisma.outboundQueue.findUnique({ where: { trackingId: req.params.trackingId } });
+    if (!item || (req.mcpUser && item.userId !== req.mcpUser.id)) {
+      return res.status(404).json({ ok: false, error: 'No queue item with that trackingId' });
+    }
+    if (item.status !== 'queued') {
+      return res.status(409).json({ ok: false, error: `Cannot cancel an item in status "${item.status}"` });
+    }
+    await prisma.outboundQueue.update({ where: { trackingId: req.params.trackingId }, data: { status: 'cancelled' } });
+    return res.json({ ok: true, status: 'cancelled', trackingId: req.params.trackingId });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Cancel failed: ${err.message}` });
+  }
 });
 
 module.exports = router;

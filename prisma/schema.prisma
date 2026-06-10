@@ -288,3 +288,51 @@ model VmRecording {
   mimeType     String   @default("audio/wav")
   createdAt    DateTime @default(now())
 }
+
+// Paced outbound send queue for the MCP bridge. Independent of sequence
+// enrollments (EmailActivity requires enrollment/step FKs; ad-hoc bridge
+// sends have neither). Drained by services/sendQueueWorker.js at the
+// configured pace, within the send window, under the per-day cap.
+model OutboundQueue {
+  id                  Int       @id @default(autoincrement())
+  userId              Int // sending Microsoft account (resolves the credential)
+  trackingId          String    @unique // returned to the caller for status polling
+  to                  String
+  subject             String    @default("")
+  body                String    @default("")
+  cc                  String?
+  bcc                 String?
+  // When set, this row is sent as a threaded reply (paced) rather than a new send.
+  inReplyToMessageId  String?
+  replyAll            Boolean   @default(false)
+  includeOriginalBody Boolean   @default(true)
+  batchId             String? // groups a day's batch for reconciliation
+  status              String    @default("queued") // queued | sending | sent | failed | cancelled
+  attempts            Int       @default(0)
+  scheduledFor        DateTime? // earliest-eligible time (default: now); future-dating allowed
+  sentAt              DateTime?
+  messageId           String?
+  internetMessageId   String?
+  conversationId      String?
+  failureReason       String?
+  createdAt           DateTime  @default(now())
+
+  @@index([userId, status])
+  @@index([batchId])
+}
+
+// Per-user, per-day send policy. Cap + gate are supplied by the Cowork
+// daily task (which reads Send Health); the connector enforces them.
+// nextEligibleAt carries the pacing cursor between worker ticks.
+model SendPolicy {
+  id             Int       @id @default(autoincrement())
+  userId         Int
+  localDate      String // "YYYY-MM-DD" in the send timezone (PT)
+  dailyCap       Int       @default(150)
+  gate           String    @default("proceed") // proceed | warning | abort
+  nextEligibleAt DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([userId, localDate])
+}
