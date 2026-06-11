@@ -307,7 +307,7 @@ model OutboundQueue {
   replyAll            Boolean   @default(false)
   includeOriginalBody Boolean   @default(true)
   batchId             String? // groups a day's batch for reconciliation
-  status              String    @default("queued") // queued | sending | sent | failed | cancelled
+  status              String    @default("queued") // queued | paused | sending | sent | failed | cancelled
   attempts            Int       @default(0)
   scheduledFor        DateTime? // earliest-eligible time (default: now); future-dating allowed
   sentAt              DateTime?
