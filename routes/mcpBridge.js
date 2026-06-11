@@ -25,6 +25,7 @@ const prisma = require('../services/database');
 const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('../services/bridgeMailer');
 const { localDateString, getConfig } = require('../services/sendPacing');
+const { buildSelectorWhere, actionStatuses, targetStatus, partitionUpdate } = require('../services/queueOps');
 
 // Loose RFC 5322-ish check — good enough to catch obvious typos.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -306,11 +307,13 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
 
 // GET /api/mcp/queue?batchId=&status=&date= — list queue items (for reconciliation).
 router.get('/queue', requireBridgeAuth, async (req, res) => {
-  const { batchId, status } = req.query || {};
+  const { batchId, status, recipient, domain } = req.query || {};
   const where = {
     ...(req.mcpUser ? { userId: req.mcpUser.id } : {}),
     ...(batchId ? { batchId: String(batchId) } : {}),
     ...(status ? { status: String(status) } : {}),
+    ...(recipient ? { to: { equals: String(recipient), mode: 'insensitive' } } : {}),
+    ...(domain ? { to: { endsWith: `@${String(domain).replace(/^@/, '')}`, mode: 'insensitive' } } : {}),
   };
   try {
     const items = await prisma.outboundQueue.findMany({
@@ -327,6 +330,125 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
     return res.json({ ok: true, total: items.length, counts, items });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
+  }
+});
+
+// POST /api/mcp/queue/manage — cancel | pause | resume one item, a batch, a
+// recipient, or a whole domain. Defined before /queue/:trackingId.
+// Body: { action: 'cancel'|'pause'|'resume', trackingId?|batchId?|recipient?|domain? }
+//   cancel: queued|paused → cancelled (terminal; never touches sending/sent)
+//   pause:  queued → paused (worker skips it)
+//   resume: paused → queued
+router.post('/queue/manage', requireBridgeAuth, async (req, res) => {
+  const { action, trackingId, batchId, recipient, domain } = req.body || {};
+  if (!['cancel', 'pause', 'resume'].includes(action)) {
+    return res.status(400).json({ ok: false, error: '"action" must be one of: cancel | pause | resume' });
+  }
+  let sel;
+  try {
+    sel = buildSelectorWhere({ trackingId, batchId, recipient, domain });
+  } catch (err) {
+    return res.status(400).json({ ok: false, error: err.message });
+  }
+
+  const scoped = { ...sel.where, ...(req.mcpUser ? { userId: req.mcpUser.id } : {}) };
+  const eligible = actionStatuses(action);
+  const newStatus = targetStatus(action);
+
+  try {
+    // Fetch ALL selector matches (any status) so we can report what was
+    // skipped (e.g. already sent) rather than silently no-op.
+    const all = await prisma.outboundQueue.findMany({
+      where: scoped,
+      select: { id: true, trackingId: true, to: true, status: true, batchId: true },
+      orderBy: { createdAt: 'asc' },
+    });
+    const actionable = all.filter((i) => eligible.includes(i.status));
+    const skipped = all
+      .filter((i) => !eligible.includes(i.status))
+      .map((i) => ({ trackingId: i.trackingId, to: i.to, status: i.status }));
+
+    if (actionable.length) {
+      await prisma.outboundQueue.updateMany({
+        where: { id: { in: actionable.map((i) => i.id) } },
+        data: {
+          status: newStatus,
+          ...(action === 'cancel' ? { failureReason: `cancelled via MCP ${new Date().toISOString()}` } : {}),
+        },
+      });
+    }
+
+    console.log(`[mcpBridge] queue ${action} by ${sel.kind}=${sel.value}: ${actionable.length} affected, ${skipped.length} skipped`);
+    return res.json({
+      ok: true,
+      action,
+      selector: { kind: sel.kind, value: sel.value },
+      count: actionable.length,
+      affected: actionable.map((i) => ({ trackingId: i.trackingId, to: i.to, fromStatus: i.status, toStatus: newStatus })),
+      skipped,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Queue ${action} failed: ${err.message}` });
+  }
+});
+
+// PATCH /api/mcp/queue/update — alter content/timing of a still-queued/paused
+// item. Single item (by trackingId). Recipient/threading are NOT editable.
+// Body: { trackingId, subject?, body?, cc?, bcc?, scheduledFor?, replyAll?, includeOriginalBody? }
+router.patch('/queue/update', requireBridgeAuth, async (req, res) => {
+  const { trackingId } = req.body || {};
+  if (!ok(trackingId)) return res.status(400).json({ ok: false, error: '"trackingId" is required' });
+
+  const { data, rejected } = partitionUpdate(req.body || {});
+  if (rejected.length) {
+    return res.status(400).json({
+      ok: false,
+      error: `These fields cannot be altered: ${rejected.join(', ')}. Allowed: subject, body, cc, bcc, scheduledFor, replyAll, includeOriginalBody. To change the recipient, cancel and re-enqueue.`,
+    });
+  }
+  if (Object.keys(data).length === 0) {
+    return res.status(400).json({ ok: false, error: 'No editable fields provided.' });
+  }
+  if (data.cc != null && data.cc !== '' && !isEmail(data.cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
+  if (data.bcc != null && data.bcc !== '' && !isEmail(data.bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
+  if ('scheduledFor' in data && data.scheduledFor != null) {
+    const d = new Date(data.scheduledFor);
+    if (Number.isNaN(d.getTime())) return res.status(400).json({ ok: false, error: '"scheduledFor" must be an ISO date' });
+    data.scheduledFor = d;
+  }
+  if ('replyAll' in data) data.replyAll = !!data.replyAll;
+  if ('includeOriginalBody' in data) data.includeOriginalBody = !!data.includeOriginalBody;
+  if (data.cc === '') data.cc = null; // empty string clears
+  if (data.bcc === '') data.bcc = null;
+
+  try {
+    const item = await prisma.outboundQueue.findUnique({ where: { trackingId } });
+    if (!item || (req.mcpUser && item.userId !== req.mcpUser.id)) {
+      return res.status(404).json({ ok: false, error: 'No queue item with that trackingId' });
+    }
+    if (!['queued', 'paused'].includes(item.status)) {
+      return res.status(409).json({ ok: false, error: `Cannot alter an item in status "${item.status}" — only queued or paused items are editable.` });
+    }
+    const updated = await prisma.outboundQueue.update({ where: { trackingId }, data });
+    return res.json({
+      ok: true,
+      status: 'updated',
+      trackingId,
+      changed: Object.keys(data),
+      item: {
+        trackingId: updated.trackingId,
+        to: updated.to,
+        subject: updated.subject,
+        status: updated.status,
+        cc: updated.cc,
+        bcc: updated.bcc,
+        scheduledFor: updated.scheduledFor,
+        replyAll: updated.replyAll,
+        includeOriginalBody: updated.includeOriginalBody,
+      },
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Update failed: ${err.message}` });
   }
 });
 

@@ -249,7 +249,7 @@ export async function runEnqueueEmail({
  * item). Returns each item's status and, once sent, its messageId /
  * internetMessageId / conversationId so the caller can reconcile.
  */
-export async function runCheckEmailQueue({ batchId, trackingId, status }) {
+export async function runCheckEmailQueue({ batchId, trackingId, status, recipient, domain }) {
   if (trackingId) {
     const r = await callBridge(`/api/mcp/queue/${encodeURIComponent(trackingId)}`, null, 'GET');
     if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
@@ -268,11 +268,12 @@ export async function runCheckEmailQueue({ batchId, trackingId, status }) {
     };
   }
 
-  const r = await callBridge('/api/mcp/queue', { batchId, status }, 'GET');
+  const r = await callBridge('/api/mcp/queue', { batchId, status, recipient, domain }, 'GET');
   if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
   const counts = Object.entries(r.counts || {}).map(([k, v]) => `${k}=${v}`).join(' ') || '(none)';
+  const scope = batchId ? ` (batch ${batchId})` : domain ? ` (@${String(domain).replace(/^@/, '')})` : recipient ? ` (${recipient})` : '';
   const lines = [
-    `Queue${batchId ? ` (batch ${batchId})` : ''}: ${r.total} item(s) — ${counts}`,
+    `Queue${scope}: ${r.total} item(s) — ${counts}`,
     ...r.items.slice(0, 50).map((it) => {
       const id = it.messageId ? ` msgId=${it.messageId.slice(0, 24)}…` : '';
       return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${id}`;
@@ -280,6 +281,72 @@ export async function runCheckEmailQueue({ batchId, trackingId, status }) {
     ...(r.items.length > 50 ? [`   …and ${r.items.length - 50} more`] : []),
   ];
   return { isError: false, text: lines.join('\n') };
+}
+
+/**
+ * Cancel / pause / resume queued items by trackingId, batchId, recipient, or
+ * domain. cancel is terminal; pause is a reversible hold (resume to release).
+ */
+export async function runManageQueuedEmail({ action, trackingId, batchId, recipient, domain }) {
+  if (!['cancel', 'pause', 'resume'].includes(action)) {
+    return { isError: true, text: '❌ "action" must be cancel | pause | resume' };
+  }
+  const sels = [['trackingId', trackingId], ['batchId', batchId], ['recipient', recipient], ['domain', domain]].filter(([, v]) => ok(v));
+  if (sels.length !== 1) {
+    return { isError: true, text: `❌ Provide exactly one selector (trackingId, batchId, recipient, or domain) — got ${sels.length}.` };
+  }
+
+  log(`manage_queued_email: ${action} by ${sels[0][0]}=${sels[0][1]}`);
+  const result = await callBridge('/api/mcp/queue/manage', { action, trackingId, batchId, recipient, domain });
+  if (result.ok) {
+    const lines = [
+      `✅ ${action} — ${result.count} item(s) affected${result.skipped?.length ? `, ${result.skipped.length} skipped` : ''}.`,
+      `   selector:  ${result.selector.kind}=${result.selector.value}`,
+      ...result.affected.slice(0, 50).map((a) => `   • ${a.trackingId}  ${a.to || ''}  ${a.fromStatus}→${a.toStatus}`),
+      ...(result.skipped?.length
+        ? ['', 'Skipped (not in an actionable status — e.g. already sent):', ...result.skipped.slice(0, 50).map((s) => `   • ${s.trackingId}  ${s.to || ''}  status=${s.status}`)]
+        : []),
+    ];
+    return { isError: false, text: lines.join('\n') };
+  }
+  warn('manage failed:', result.error);
+  return { isError: true, text: `❌ ${action} failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}` };
+}
+
+/**
+ * Alter a still-queued/paused item's content or timing. Recipient and
+ * threading are NOT editable (cancel + re-enqueue to change those).
+ */
+export async function runUpdateQueuedEmail({ trackingId, subject, body, cc, bcc, scheduledFor, replyAll, includeOriginalBody }) {
+  if (!ok(trackingId)) return { isError: true, text: '❌ "trackingId" is required' };
+  const payload = { trackingId };
+  if (subject !== undefined) payload.subject = subject;
+  if (body !== undefined) payload.body = body;
+  if (cc !== undefined) payload.cc = cc;
+  if (bcc !== undefined) payload.bcc = bcc;
+  if (scheduledFor !== undefined) payload.scheduledFor = scheduledFor;
+  if (replyAll !== undefined) payload.replyAll = replyAll;
+  if (includeOriginalBody !== undefined) payload.includeOriginalBody = includeOriginalBody;
+  if (Object.keys(payload).length === 1) {
+    return { isError: true, text: '❌ Provide at least one field to change (subject, body, cc, bcc, scheduledFor, replyAll, includeOriginalBody).' };
+  }
+
+  log(`update_queued_email: ${trackingId} fields=${Object.keys(payload).filter((k) => k !== 'trackingId').join(',')}`);
+  const result = await callBridge('/api/mcp/queue/update', payload, 'PATCH');
+  if (result.ok) {
+    return {
+      isError: false,
+      text: [
+        `✅ Updated ${trackingId} (changed: ${result.changed.join(', ')}).`,
+        `   to:        ${result.item.to}`,
+        `   subject:   ${result.item.subject}`,
+        `   status:    ${result.item.status}`,
+        ...(result.item.scheduledFor ? [`   sendAfter: ${result.item.scheduledFor}`] : []),
+      ].join('\n'),
+    };
+  }
+  warn('update failed:', result.error);
+  return { isError: true, text: `❌ Update failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}` };
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -423,8 +490,65 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         properties: {
           batchId: { type: 'string', description: 'Show all items in this batch.' },
           trackingId: { type: 'string', description: 'Show a single item by its tracking id.' },
-          status: { type: 'string', description: 'Optional filter: queued | sending | sent | failed | cancelled.' },
+          status: { type: 'string', description: 'Optional filter: queued | paused | sending | sent | failed | cancelled.' },
+          recipient: { type: 'string', description: 'Show items addressed to this exact email.' },
+          domain: { type: 'string', description: 'Show items to this recipient domain, e.g. "amd.com".' },
         },
+      },
+    },
+    {
+      name: 'manage_queued_email',
+      description: [
+        'Cancel, pause, or resume queued sends. Acts on exactly ONE selector:',
+        'trackingId (one item), batchId (a whole batch), recipient (one address),',
+        'or domain (e.g. "amd.com" — everything to that domain).',
+        '',
+        '- cancel: terminal. queued/paused → cancelled. Never touches an item that',
+        '  is already sending or sent (those are reported as skipped).',
+        '- pause:  reversible hold. queued → paused; the worker skips paused items.',
+        '- resume: paused → queued; the worker resumes pacing it.',
+        '',
+        'Use this to stop outreach (e.g. pause or cancel everything to a domain).',
+        'Returns which items were affected and which were skipped.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', enum: ['cancel', 'pause', 'resume'], description: 'cancel (terminal) | pause (reversible) | resume.' },
+          trackingId: { type: 'string', description: 'Target a single item.' },
+          batchId: { type: 'string', description: 'Target a whole batch.' },
+          recipient: { type: 'string', description: 'Target one exact recipient email.' },
+          domain: { type: 'string', description: 'Target a recipient domain, e.g. "amd.com".' },
+        },
+        required: ['action'],
+      },
+    },
+    {
+      name: 'update_queued_email',
+      description: [
+        'Alter a still-queued (or paused) item\'s content or timing before it',
+        'sends. Identify it by trackingId. You can change subject, body, cc, bcc,',
+        'scheduledFor (earliest send time), replyAll, includeOriginalBody.',
+        '',
+        'You CANNOT change the recipient or which message a reply threads onto —',
+        'to change those, cancel the item and enqueue a new one. Fails if the item',
+        'has already sent / is sending / was cancelled.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          trackingId: { type: 'string', description: 'The item to edit (required).' },
+          subject: { type: 'string', description: 'New subject (ignored for replies, which use "Re: …").' },
+          body: { type: 'string', description: 'New body. Plain text or HTML.' },
+          cc: { type: 'string', description: 'New CC address; empty string clears it.' },
+          bcc: { type: 'string', description: 'New BCC address; empty string clears it.' },
+          scheduledFor: { type: 'string', description: 'ISO timestamp — earliest time this may send (still subject to pacing/window/cap).' },
+          replyAll: { type: 'boolean', description: 'For reply items: reply to all.' },
+          includeOriginalBody: { type: 'boolean', description: 'For reply items: quote the original.' },
+        },
+        required: ['trackingId'],
       },
     },
   ],
@@ -441,6 +565,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     outcome = await runEnqueueEmail(args || {});
   } else if (name === 'check_email_queue') {
     outcome = await runCheckEmailQueue(args || {});
+  } else if (name === 'manage_queued_email') {
+    outcome = await runManageQueuedEmail(args || {});
+  } else if (name === 'update_queued_email') {
+    outcome = await runUpdateQueuedEmail(args || {});
   } else {
     return {
       isError: true,
