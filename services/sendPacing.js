@@ -14,8 +14,8 @@ function getConfig() {
     tz: process.env.SEND_TIMEZONE || 'America/Los_Angeles',
     windowStartHour: num(process.env.SEND_WINDOW_START_HOUR, 8),
     windowEndHour: num(process.env.SEND_WINDOW_END_HOUR, 17),
-    paceMinMs: num(process.env.SEND_PACE_MIN_MS, 180000), // 3 min
-    paceMaxMs: num(process.env.SEND_PACE_MAX_MS, 240000), // 4 min
+    paceMinMs: num(process.env.SEND_PACE_MIN_MS, 60000), // 1 min
+    paceMaxMs: num(process.env.SEND_PACE_MAX_MS, 120000), // 2 min
     jitterMs: num(process.env.SEND_JITTER_MS, 30000), // ±30 s
     defaultDailyCap: num(process.env.SEND_DEFAULT_DAILY_CAP, 150),
   };
