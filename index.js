@@ -136,7 +136,7 @@ cron.schedule('*/10 * * * *', async () => {
 });
 
 // ── Paced send-queue worker ──────────────────────────────────────────────────
-// Runs every minute — drains OutboundQueue at the configured pace (3–4 min ±
+// Runs every minute — drains OutboundQueue at the configured pace (1–2 min ±
 // jitter) inside the send window (8am–5pm PT), under the day's cap, halting if
 // the day is gated `abort`. Sends at most one message per user per tick, so the
 // per-minute cron naturally produces the multi-minute spacing. Disable with
