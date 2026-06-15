@@ -7,6 +7,40 @@ const nodemailer = require('nodemailer');
 const prisma = require('../services/database');
 const { authenticateToken } = require('../middleware/auth');
 
+// Single-tenant: scope Microsoft token endpoints to our Entra tenant via
+// MICROSOFT_TENANT_ID (matches routes/microsoftOAuth.js); 'common' only as a
+// local-dev fallback when the env var is unset.
+const MS_TENANT = process.env.MICROSOFT_TENANT_ID || 'common';
+
+// Credential rows must never ship their secret values to the browser. The
+// IntegrationCredential columns are overloaded per provider, so secrets live
+// in different fields:
+//   microsoft  → refreshToken (mailbox token); clientSecret now '', clientId = app id
+//   google     → clientSecret (Gmail app password) + refreshToken
+//   claude     → clientId (API key);  clientSecret = model name (safe to show)
+//   elevenlabs → clientId (API key);  clientSecret = agent id (safe to show)
+//   apify      → clientId (API token) + refreshToken
+// We mask only the secret fields per provider with a truthy sentinel, so the
+// UI's "connected?" checks (which test truthiness) and the Claude-model /
+// ElevenLabs-agent-id display values keep working. Unknown providers are
+// masked conservatively (all three credential fields).
+const REDACTED = '__redacted__';
+const SECRET_FIELDS = {
+  microsoft:  ['refreshToken'],
+  google:     ['clientSecret', 'refreshToken'],
+  claude:     ['clientId'],
+  elevenlabs: ['clientId'],
+  apify:      ['clientId', 'refreshToken'],
+};
+const DEFAULT_SECRET_FIELDS = ['clientId', 'clientSecret', 'refreshToken'];
+function redactCredential(c) {
+  if (!c) return c;
+  const fields = SECRET_FIELDS[c.provider] || DEFAULT_SECRET_FIELDS;
+  const out = { ...c };
+  for (const f of fields) if (out[f]) out[f] = REDACTED; // hide value, preserve truthiness
+  return out;
+}
+
 router.use(authenticateToken);
 
 router.get('/', async (req, res) => {
@@ -14,7 +48,7 @@ router.get('/', async (req, res) => {
     const creds = await prisma.integrationCredential.findMany({
       where: { userId: req.userId }
     });
-    res.json(creds);
+    res.json(creds.map(redactCredential));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -66,7 +100,7 @@ router.post('/', async (req, res) => {
       // - Calls.AccessMedia.All
       // - offline_access
 
-      await axios.post('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
+      await axios.post(`https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`, {
         client_id: clientId,
         client_secret: clientSecret,
         refresh_token: refreshToken,
@@ -84,7 +118,7 @@ router.post('/', async (req, res) => {
       update: { clientId, clientSecret, refreshToken, email },
       create: { provider, clientId, clientSecret, refreshToken, email, userId: req.userId }
     });
-    res.json(cred);
+    res.json(redactCredential(cred));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
