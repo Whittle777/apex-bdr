@@ -128,11 +128,16 @@ router.get('/callback', async (req, res) => {
       create: { email: msEmail, name: msName, azureAdId: msObjId },
     });
 
-    // Store (or refresh) Microsoft credential for this user
+    // Store (or refresh) Microsoft credential for this user.
+    // NOTE: we deliberately do NOT persist the confidential client secret here.
+    // The app secret lives only in MICROSOFT_CLIENT_SECRET (env); storing a copy
+    // on every row duplicated the credential across the DB (security finding).
+    // clientSecret is left blank for Microsoft rows; token paths read the secret
+    // from env (services/sequenceMailer.js, replyDetector.js, oauthService.js).
     await prisma.integrationCredential.upsert({
       where:  { provider_userId: { provider: 'microsoft', userId: user.id } },
-      update: { clientId: MS_CLIENT_ID, clientSecret: MS_CLIENT_SECRET, refreshToken: refresh_token, email: msEmail, tenantId },
-      create: { provider: 'microsoft', clientId: MS_CLIENT_ID, clientSecret: MS_CLIENT_SECRET, refreshToken: refresh_token, email: msEmail, tenantId, userId: user.id },
+      update: { clientId: MS_CLIENT_ID, clientSecret: '', refreshToken: refresh_token, email: msEmail, tenantId },
+      create: { provider: 'microsoft', clientId: MS_CLIENT_ID, clientSecret: '', refreshToken: refresh_token, email: msEmail, tenantId, userId: user.id },
     });
 
     // Issue a long-lived JWT (30 days — reps shouldn't be re-authing constantly)

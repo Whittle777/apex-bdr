@@ -1,6 +1,11 @@
 const axios = require('axios');
 
 const prisma = require('./database');
+
+// Single-tenant: scope Microsoft token endpoints to our Entra tenant via
+// MICROSOFT_TENANT_ID (matches routes/microsoftOAuth.js); 'common' only as a
+// local-dev fallback when the env var is unset.
+const MS_TENANT = process.env.MICROSOFT_TENANT_ID || 'common';
 async function getOAuthToken(provider, userId) {
   // Try to find a valid standard token record if one was established previously
   const tokenRecord = await prisma.oauthToken.findUnique({
@@ -42,9 +47,11 @@ async function fetchNewToken(provider, userId) {
     });
     return response.data.access_token;
   } else if (provider === 'microsoft') {
-    const response = await axios.post('https://login.microsoftonline.com/common/oauth2/v2.0/token', {
-      client_id: cred.clientId,
-      client_secret: cred.clientSecret,
+    // App credential from env (single source of truth) — the DB row no longer
+    // stores the Microsoft secret. cred.clientId is the non-secret app id.
+    const response = await axios.post(`https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`, {
+      client_id: process.env.MICROSOFT_CLIENT_ID || cred.clientId,
+      client_secret: process.env.MICROSOFT_CLIENT_SECRET,
       refresh_token: cred.refreshToken,
       grant_type: 'refresh_token',
     });
