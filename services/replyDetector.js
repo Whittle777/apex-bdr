@@ -256,16 +256,24 @@ async function processReply({ emailActivity, fromEmail, subject, body, receivedA
 
 // ─── Microsoft Graph Polling ──────────────────────────────────────────────────
 
+// Single-tenant: scope the token endpoint to our Entra tenant via
+// MICROSOFT_TENANT_ID (matches routes/microsoftOAuth.js); 'common' only as a
+// local-dev fallback when the env var is unset.
+const MS_TENANT = process.env.MICROSOFT_TENANT_ID || 'common';
+
 async function refreshGraphToken(cred) {
+  // App credential comes from env (single source of truth) — not from the DB
+  // row, which no longer stores the secret. cred.clientId is the non-secret app
+  // id; prefer env but fall back to the row for older data.
   const params = new URLSearchParams({
-    client_id: cred.clientId,
-    client_secret: cred.clientSecret,
+    client_id: process.env.MICROSOFT_CLIENT_ID || cred.clientId,
+    client_secret: process.env.MICROSOFT_CLIENT_SECRET,
     refresh_token: cred.refreshToken,
     grant_type: 'refresh_token',
     scope: 'https://graph.microsoft.com/Mail.Read offline_access',
   });
   const res = await axios.post(
-    'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`,
     params.toString(),
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
   );
