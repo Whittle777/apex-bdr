@@ -4,7 +4,8 @@
  * Why: the MCP bridge used to send synchronously on every tool call, so a
  * batch left the mailbox in a burst — a top deliverability/spam trigger.
  * This worker (run by node-cron every minute) sends at most ONE queued
- * message per user per eligible tick, spaced 3–4 min ± jitter, only inside
+ * message per user per eligible tick, spaced a uniform-random 30–90s (env-
+ * configurable) apart, only inside
  * the 8am–5pm PT window, never exceeding the day's cap, and not at all if
  * the day is gated `abort` (Send Health CRITICAL). Cap + gate are supplied
  * by the Cowork daily task at enqueue time (the connector can't read the
@@ -79,6 +80,8 @@ async function getSendPolicyStatus(userId, now = new Date()) {
     tz: cfg.tz,
     windowStartHour: cfg.windowStartHour,
     windowEndHour: cfg.windowEndHour,
+    paceMinSeconds: cfg.paceMinSeconds,
+    paceMaxSeconds: cfg.paceMaxSeconds,
     hardCapCeiling: cfg.hardCapCeiling,
     localDate,
     nextEligibleAt: policy?.nextEligibleAt || null,
@@ -138,7 +141,6 @@ async function drainQueue({ now = new Date() } = {}) {
       queuedItems: items,
       paceMinMs: cfg.paceMinMs,
       paceMaxMs: cfg.paceMaxMs,
-      jitterMs: cfg.jitterMs,
     });
 
     if (decision.action !== 'send') continue;

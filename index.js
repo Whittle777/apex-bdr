@@ -136,17 +136,24 @@ cron.schedule('*/10 * * * *', async () => {
 });
 
 // ── Paced send-queue worker ──────────────────────────────────────────────────
-// Runs every minute — drains OutboundQueue at the configured pace (1–2 min ±
-// jitter) inside the send window (8am–5pm PT), under the day's cap, halting if
-// the day is gated `abort`. Sends at most one message per user per tick, so the
-// per-minute cron naturally produces the multi-minute spacing. Disable with
-// SEND_QUEUE_ENABLED=0.
-cron.schedule('* * * * *', async () => {
+// Ticks every 15s and sends at most one message per user per tick, spacing the
+// next send by a uniform-random PACE_MIN_SECONDS–PACE_MAX_SECONDS (default
+// 30–90s) via SendPolicy.nextEligibleAt. The 15s tick matches the 15s pacing
+// floor, so actual spacing tracks the configured interval (quantized to 15s)
+// instead of being rounded up to whole minutes. Still only inside the 8am–5pm
+// PT window, under the day's cap + rolling weekly cap, halting if gated `abort`.
+// Disable with SEND_QUEUE_ENABLED=0.
+let draining = false; // reentrancy guard — skip a tick if the prior run is still in flight
+cron.schedule('*/15 * * * * *', async () => {
+  if (draining) return;
+  draining = true;
   try {
     const r = await drainQueue();
     if (r && r.sent > 0) console.log(`[Send Queue] drained ${r.sent} message(s)`);
   } catch (err) {
     console.error('[Send Queue] Cron error:', err.message);
+  } finally {
+    draining = false;
   }
 });
 

@@ -10,11 +10,12 @@
  */
 const {
   pickNextDecision, computeInterval, localHour, localDateString,
-  clampCap, effectiveCap, getConfig, DEFAULT_HARD_CAP_CEILING,
+  clampCap, effectiveCap, resolvePace, getConfig, DEFAULT_HARD_CAP_CEILING,
+  PACE_FLOOR_SECONDS, PACE_CEILING_SECONDS,
 } = require('../services/sendPacing');
 
 const TZ = 'America/Los_Angeles';
-const PACE = { paceMinMs: 180000, paceMaxMs: 240000, jitterMs: 30000 }; // 3–4 min ±30s
+const PACE = { paceMinMs: 30000, paceMaxMs: 90000 }; // uniform 30–90s
 
 // Deterministic PRNG (mulberry32) so spacing is reproducible.
 function seededRng(seed) {
@@ -85,13 +86,13 @@ describe('send pacing — pickNextDecision', () => {
     expect(d.action).toBe('wait');
   });
 
-  test('send picks the OLDEST eligible item and schedules the next ~3–4min out', () => {
+  test('send picks the OLDEST eligible item and schedules the next 30–90s out', () => {
     const d = pickNextDecision(baseArgs({ now: inWindow }));
     expect(d.action).toBe('send');
     expect(d.item.id).toBe(1); // oldest
     const gap = d.nextEligibleAt.getTime() - inWindow.getTime();
-    expect(gap).toBeGreaterThanOrEqual(PACE.paceMinMs - PACE.jitterMs); // >= 2.5 min
-    expect(gap).toBeLessThanOrEqual(PACE.paceMaxMs + PACE.jitterMs + 1); // <= 4.5 min
+    expect(gap).toBeGreaterThanOrEqual(PACE.paceMinMs); // >= 30s
+    expect(gap).toBeLessThanOrEqual(PACE.paceMaxMs); // <= 90s
   });
 
   test('future-dated scheduledFor item is not eligible yet', () => {
@@ -100,18 +101,29 @@ describe('send pacing — pickNextDecision', () => {
     expect(d.action).toBe('idle');
   });
 
-  test('computeInterval stays within [pace-jitter, pace+jitter]', () => {
+  test('computeInterval is uniform within [paceMinMs, paceMaxMs]', () => {
     const lo = computeInterval({ ...PACE, rng: () => 0 });
     const hi = computeInterval({ ...PACE, rng: () => 0.999999 });
-    expect(lo).toBe(PACE.paceMinMs - PACE.jitterMs); // 150000
-    expect(hi).toBeLessThanOrEqual(PACE.paceMaxMs + PACE.jitterMs + 1); // ~270000
+    expect(lo).toBe(PACE.paceMinMs); // 30000
+    expect(hi).toBeLessThanOrEqual(PACE.paceMaxMs); // <= 90000
+    expect(hi).toBeGreaterThan(PACE.paceMinMs);
+  });
+
+  test('computeInterval is random across samples and always within bounds', () => {
+    const rng = seededRng(11);
+    const samples = Array.from({ length: 200 }, () => computeInterval({ ...PACE, rng }));
+    for (const s of samples) {
+      expect(s).toBeGreaterThanOrEqual(PACE.paceMinMs);
+      expect(s).toBeLessThanOrEqual(PACE.paceMaxMs);
+    }
+    expect(new Set(samples).size).toBeGreaterThan(50); // not robotic / fixed
   });
 });
 
 describe('send pacing — full-day simulation', () => {
   // Drive the decision loop with a mock clock: enqueue 5, advance time to each
   // scheduled send, collect the actual send instants, assert spacing + window.
-  test('enqueue 5 → ~3–4min spacing + jitter, all in-window', () => {
+  test('enqueue 5 → 30–90s random spacing, all in-window', () => {
     const rng = seededRng(7);
     let now = new Date('2026-06-10T17:00:00Z'); // 10:00 PT
     let nextEligibleAt = null;
@@ -143,13 +155,13 @@ describe('send pacing — full-day simulation', () => {
       expect(h).toBeGreaterThanOrEqual(8);
       expect(h).toBeLessThan(17);
     }
-    // Consecutive gaps within [2.5min, 4.5min], and not all identical (jitter).
+    // Consecutive gaps within [30s, 90s], and not all identical (random).
     const gaps = sendTimes.slice(1).map((t, i) => t.getTime() - sendTimes[i].getTime());
     for (const g of gaps) {
-      expect(g).toBeGreaterThanOrEqual(PACE.paceMinMs - PACE.jitterMs);
-      expect(g).toBeLessThanOrEqual(PACE.paceMaxMs + PACE.jitterMs + 1);
+      expect(g).toBeGreaterThanOrEqual(PACE.paceMinMs);
+      expect(g).toBeLessThanOrEqual(PACE.paceMaxMs);
     }
-    expect(new Set(gaps).size).toBeGreaterThan(1); // jitter produced variation
+    expect(new Set(gaps).size).toBeGreaterThan(1); // random produced variation
   });
 
   test('cap halts the batch partway through', () => {
@@ -239,8 +251,47 @@ describe('send pacing — rolling weekly cap', () => {
   });
 });
 
+describe('send pacing — resolvePace (interval config + clamps)', () => {
+  test('defaults to 30–90s', () => {
+    const p = resolvePace({});
+    expect(p.paceMinSeconds).toBe(30);
+    expect(p.paceMaxSeconds).toBe(90);
+    expect(p.paceMinMs).toBe(30000);
+    expect(p.paceMaxMs).toBe(90000);
+  });
+
+  test('honors valid env values', () => {
+    const p = resolvePace({ PACE_MIN_SECONDS: '45', PACE_MAX_SECONDS: '90' });
+    expect(p.paceMinSeconds).toBe(45);
+    expect(p.paceMaxSeconds).toBe(90);
+  });
+
+  test('clamps a too-low PACE_MIN to the 15s hard floor', () => {
+    const p = resolvePace({ PACE_MIN_SECONDS: '1', PACE_MAX_SECONDS: '90' });
+    expect(p.paceMinSeconds).toBe(PACE_FLOOR_SECONDS); // 15
+  });
+
+  test('clamps a too-high PACE_MAX to the 600s ceiling', () => {
+    const p = resolvePace({ PACE_MIN_SECONDS: '30', PACE_MAX_SECONDS: '99999' });
+    expect(p.paceMaxSeconds).toBe(PACE_CEILING_SECONDS); // 600
+  });
+
+  test('swaps a reversed pair (min > max) instead of erroring', () => {
+    const p = resolvePace({ PACE_MIN_SECONDS: '90', PACE_MAX_SECONDS: '30' });
+    expect(p.paceMinSeconds).toBe(30);
+    expect(p.paceMaxSeconds).toBe(90);
+  });
+
+  test('getConfig surfaces pace bounds', () => {
+    const cfg = getConfig();
+    expect(cfg.paceMinSeconds).toBeGreaterThanOrEqual(PACE_FLOOR_SECONDS);
+    expect(cfg.paceMaxSeconds).toBeLessThanOrEqual(PACE_CEILING_SECONDS);
+    expect(cfg.paceMinMs).toBe(cfg.paceMinSeconds * 1000);
+  });
+});
+
 describe('send pacing — getConfig env wiring', () => {
-  const ENV_KEYS = ['DAILY_SEND_CAP', 'SEND_DEFAULT_DAILY_CAP', 'SEND_HARD_CAP_CEILING', 'WEEKLY_SEND_CAP', 'SEND_WEEKLY_HARD_CEILING'];
+  const ENV_KEYS = ['DAILY_SEND_CAP', 'SEND_DEFAULT_DAILY_CAP', 'SEND_HARD_CAP_CEILING', 'WEEKLY_SEND_CAP', 'SEND_WEEKLY_HARD_CEILING', 'PACE_MIN_SECONDS', 'PACE_MAX_SECONDS'];
   let saved;
   beforeEach(() => {
     saved = {};
