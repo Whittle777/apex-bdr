@@ -42,9 +42,11 @@ function effectiveCap({ policyCap, defaultCap, ceiling = DEFAULT_HARD_CAP_CEILIN
 // via PACE_MIN_SECONDS / PACE_MAX_SECONDS without a redeploy.
 const DEFAULT_PACE_MIN_SECONDS = 30;
 const DEFAULT_PACE_MAX_SECONDS = 90;
-// HARD floor: never burst faster than 1 send / 15s from one mailbox regardless
+// HARD floor: never burst faster than 1 send / 10s from one mailbox regardless
 // of env — a typo (e.g. PACE_MIN_SECONDS=1) can't torch the sending domain.
-const PACE_FLOOR_SECONDS = 15;
+// (Lowered from 15s → 10s 2026-06-16 at Henry's explicit request to run 10–15s,
+// accepting the deliverability risk at ~7% bounce.)
+const PACE_FLOOR_SECONDS = 10;
 const PACE_CEILING_SECONDS = 600;
 
 const numOr = (v, d) => (v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v) : d);
