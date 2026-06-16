@@ -20,7 +20,7 @@
 const prisma = require('./database');
 const { getMicrosoftAccessToken } = require('./sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('./bridgeMailer');
-const { getConfig, localDateString, localHour, computeInterval, pickNextDecision } = require('./sendPacing');
+const { getConfig, localDateString, localHour, computeInterval, pickNextDecision, effectiveCap } = require('./sendPacing');
 
 /**
  * Count messages already sent today (in the send tz) for a user. Low daily
@@ -35,6 +35,37 @@ async function countSentToday(userId, now, cfg) {
     select: { sentAt: true },
   });
   return recent.filter((r) => r.sentAt && localDateString(r.sentAt, cfg.tz) === todayLocal).length;
+}
+
+/**
+ * Summarize the live send policy for one user/day — the numbers the agent
+ * needs to tell "stopped because cap" from "stalled". Mirrors exactly what
+ * drainQueue enforces: effective cap (per-day policy ?? env default, clamped),
+ * sends used today, remaining, gate, and whether the window is currently open.
+ */
+async function getSendPolicyStatus(userId, now = new Date()) {
+  const cfg = getConfig();
+  const localDate = localDateString(now, cfg.tz);
+  const policy = await prisma.sendPolicy
+    .findUnique({ where: { userId_localDate: { userId, localDate } } })
+    .catch(() => null);
+  const cap = effectiveCap({ policyCap: policy?.dailyCap, defaultCap: cfg.defaultDailyCap, ceiling: cfg.hardCapCeiling });
+  const gate = policy?.gate ?? 'proceed';
+  const sentToday = await countSentToday(userId, now, cfg);
+  const hour = localHour(now, cfg.tz);
+  return {
+    cap,
+    sentToday,
+    remainingToday: Math.max(0, cap - sentToday),
+    gate,
+    windowOpen: hour >= cfg.windowStartHour && hour < cfg.windowEndHour,
+    tz: cfg.tz,
+    windowStartHour: cfg.windowStartHour,
+    windowEndHour: cfg.windowEndHour,
+    hardCapCeiling: cfg.hardCapCeiling,
+    localDate,
+    nextEligibleAt: policy?.nextEligibleAt || null,
+  };
 }
 
 /**
@@ -68,7 +99,10 @@ async function drainQueue({ now = new Date() } = {}) {
   for (const [userId, items] of byUser) {
     const localDate = localDateString(now, cfg.tz);
     const policy = await prisma.sendPolicy.findUnique({ where: { userId_localDate: { userId, localDate } } }).catch(() => null);
-    const dailyCap = policy?.dailyCap ?? cfg.defaultDailyCap;
+    // Per-day policy cap (from Cowork/Send Health) is authoritative and wins
+    // over the env default; effectiveCap also clamps it to the hard ceiling so
+    // even a bad policy row can't exceed the safety limit.
+    const dailyCap = effectiveCap({ policyCap: policy?.dailyCap, defaultCap: cfg.defaultDailyCap, ceiling: cfg.hardCapCeiling });
     const gate = policy?.gate ?? 'proceed';
     const sentTodayCount = await countSentToday(userId, now, cfg);
 
@@ -160,5 +194,6 @@ module.exports = {
   computeInterval,
   pickNextDecision,
   countSentToday,
+  getSendPolicyStatus,
   drainQueue,
 };

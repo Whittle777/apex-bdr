@@ -5,10 +5,38 @@
  * wraps these with the Prisma/Graph side effects.
  */
 
+// Hard safety ceiling: no daily cap (env default OR a per-day SendPolicy row OR
+// a per-call override) may ever exceed this, so a typo like 1500 can't blast
+// the mailbox. Itself overridable via SEND_HARD_CAP_CEILING for ops, but that's
+// a deliberate, separate knob — the everyday cap env can't quietly cross it.
+const DEFAULT_HARD_CAP_CEILING = 300;
+
+// Clamp any requested cap into [0, ceiling]. Non-numeric/negative → 0.
+function clampCap(cap, ceiling = DEFAULT_HARD_CAP_CEILING) {
+  const n = Number(cap);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(Math.floor(n), ceiling);
+}
+
+/**
+ * The cap the worker actually enforces for a user/day. Per-day SendPolicy.cap
+ * (written by the Cowork daily task from Send Health) is authoritative and wins
+ * over the env default; either way the result is clamped to the hard ceiling.
+ * PURE — no DB/clock.
+ */
+function effectiveCap({ policyCap, defaultCap, ceiling = DEFAULT_HARD_CAP_CEILING } = {}) {
+  const base = policyCap != null ? policyCap : defaultCap;
+  return clampCap(base, ceiling);
+}
+
 // Config (env-driven, tunable on Railway without redeploy). Read here so the
 // route and worker share one source of defaults.
 function getConfig() {
   const num = (v, d) => (v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v) : d);
+  const hardCapCeiling = num(process.env.SEND_HARD_CAP_CEILING, DEFAULT_HARD_CAP_CEILING);
+  // Accept the spec name DAILY_SEND_CAP as an alias for SEND_DEFAULT_DAILY_CAP;
+  // the former wins if both are set. Clamped so an env typo can't exceed the ceiling.
+  const rawDefaultCap = num(process.env.DAILY_SEND_CAP, num(process.env.SEND_DEFAULT_DAILY_CAP, 150));
   return {
     enabled: process.env.SEND_QUEUE_ENABLED !== '0', // default ON; set 0 to disable
     tz: process.env.SEND_TIMEZONE || 'America/Los_Angeles',
@@ -17,7 +45,8 @@ function getConfig() {
     paceMinMs: num(process.env.SEND_PACE_MIN_MS, 60000), // 1 min
     paceMaxMs: num(process.env.SEND_PACE_MAX_MS, 120000), // 2 min
     jitterMs: num(process.env.SEND_JITTER_MS, 30000), // ±30 s
-    defaultDailyCap: num(process.env.SEND_DEFAULT_DAILY_CAP, 150),
+    hardCapCeiling,
+    defaultDailyCap: clampCap(rawDefaultCap, hardCapCeiling),
   };
 }
 
@@ -92,6 +121,9 @@ function pickNextDecision({
 }
 
 module.exports = {
+  DEFAULT_HARD_CAP_CEILING,
+  clampCap,
+  effectiveCap,
   getConfig,
   localDateString,
   localHour,

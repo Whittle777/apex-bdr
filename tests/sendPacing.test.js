@@ -8,7 +8,10 @@
  *  - cap:    stops at the daily cap
  *  - gate:   abort halts the day entirely
  */
-const { pickNextDecision, computeInterval, localHour, localDateString } = require('../services/sendPacing');
+const {
+  pickNextDecision, computeInterval, localHour, localDateString,
+  clampCap, effectiveCap, getConfig, DEFAULT_HARD_CAP_CEILING,
+} = require('../services/sendPacing');
 
 const TZ = 'America/Los_Angeles';
 const PACE = { paceMinMs: 180000, paceMaxMs: 240000, jitterMs: 30000 }; // 3–4 min ±30s
@@ -175,5 +178,73 @@ describe('send pacing — full-day simulation', () => {
     expect(sent).toBe(2);
     expect(lastAction).toBe('cap-reached');
     expect(items.length).toBe(3); // remainder stays queued
+  });
+});
+
+describe('send pacing — cap clamping + effective cap', () => {
+  test('clampCap bounds to [0, ceiling] and floors', () => {
+    expect(clampCap(150)).toBe(150);
+    expect(clampCap(150.9)).toBe(150);
+    expect(clampCap(99999)).toBe(DEFAULT_HARD_CAP_CEILING); // typo can't blast the mailbox
+    expect(clampCap(-5)).toBe(0);
+    expect(clampCap('not a number')).toBe(0);
+    expect(clampCap(500, 300)).toBe(300);
+  });
+
+  test('effectiveCap: per-day policy wins over the env default, both clamped', () => {
+    // Per-day policy authoritative (the spec decision): policy cap wins.
+    expect(effectiveCap({ policyCap: 122, defaultCap: 150 })).toBe(122);
+    // No policy row → fall back to the env default.
+    expect(effectiveCap({ policyCap: null, defaultCap: 150 })).toBe(150);
+    expect(effectiveCap({ policyCap: undefined, defaultCap: 150 })).toBe(150);
+    // A policy of 0 (deliberate halt-low) is honored, not treated as "unset".
+    expect(effectiveCap({ policyCap: 0, defaultCap: 150 })).toBe(0);
+    // Even a bad policy row can't exceed the ceiling.
+    expect(effectiveCap({ policyCap: 5000, defaultCap: 150, ceiling: 300 })).toBe(300);
+  });
+});
+
+describe('send pacing — getConfig env wiring', () => {
+  const ENV_KEYS = ['DAILY_SEND_CAP', 'SEND_DEFAULT_DAILY_CAP', 'SEND_HARD_CAP_CEILING'];
+  let saved;
+  beforeEach(() => {
+    saved = {};
+    for (const k of ENV_KEYS) { saved[k] = process.env[k]; delete process.env[k]; }
+  });
+  afterEach(() => {
+    for (const k of ENV_KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  });
+
+  test('defaults: cap 150, ceiling 300', () => {
+    const cfg = getConfig();
+    expect(cfg.defaultDailyCap).toBe(150);
+    expect(cfg.hardCapCeiling).toBe(DEFAULT_HARD_CAP_CEILING);
+  });
+
+  test('SEND_DEFAULT_DAILY_CAP is honored', () => {
+    process.env.SEND_DEFAULT_DAILY_CAP = '125';
+    expect(getConfig().defaultDailyCap).toBe(125);
+  });
+
+  test('DAILY_SEND_CAP alias wins over SEND_DEFAULT_DAILY_CAP', () => {
+    process.env.SEND_DEFAULT_DAILY_CAP = '125';
+    process.env.DAILY_SEND_CAP = '150';
+    expect(getConfig().defaultDailyCap).toBe(150);
+  });
+
+  test('an over-ceiling env cap is clamped to the ceiling', () => {
+    process.env.DAILY_SEND_CAP = '5000';
+    expect(getConfig().defaultDailyCap).toBe(DEFAULT_HARD_CAP_CEILING);
+  });
+
+  test('SEND_HARD_CAP_CEILING raises the ceiling deliberately', () => {
+    process.env.SEND_HARD_CAP_CEILING = '400';
+    process.env.DAILY_SEND_CAP = '380';
+    const cfg = getConfig();
+    expect(cfg.hardCapCeiling).toBe(400);
+    expect(cfg.defaultDailyCap).toBe(380);
   });
 });
