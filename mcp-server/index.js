@@ -357,8 +357,16 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
   const scope = batchId ? ` (batch ${batchId})` : domain ? ` (@${String(domain).replace(/^@/, '')})` : recipient ? ` (${recipient})` : '';
   const p = r.policy;
   const policyLine = p
-    ? `Send policy today (${p.localDate}): cap=${p.cap} sentToday=${p.sentToday} remainingToday=${p.remainingToday} gate=${p.gate} window=${p.windowOpen ? 'OPEN' : 'CLOSED'} (${p.windowStartHour}:00–${p.windowEndHour}:00 ${p.tz}).` +
-      (p.gate === 'abort' ? ' ⛔ gate=abort — sending halted for the day.' : p.remainingToday === 0 ? ' ⚠️ cap reached — remaining items carry to the next window/day.' : '')
+    ? `Send policy today (${p.localDate}): cap=${p.cap} sentToday=${p.sentToday} remainingToday=${p.remainingToday}` +
+      (p.weeklyCap != null ? ` | weeklyCap=${p.weeklyCap} sentThisWeek=${p.sentThisWeek} remainingThisWeek=${p.remainingThisWeek} (rolling 7d)` : '') +
+      ` | gate=${p.gate} window=${p.windowOpen ? 'OPEN' : 'CLOSED'} (${p.windowStartHour}:00–${p.windowEndHour}:00 ${p.tz}).` +
+      (p.gate === 'abort'
+        ? ' ⛔ gate=abort — sending halted for the day.'
+        : p.remainingThisWeek === 0
+          ? ' ⛔ weekly cap reached — paused until the rolling 7-day total drops below the cap.'
+          : p.remainingToday === 0
+            ? ' ⚠️ daily cap reached — remaining items carry to the next window/day.'
+            : '')
     : null;
   const lines = [
     `Queue${scope}: ${r.total} item(s) — ${counts}`,
@@ -383,17 +391,24 @@ export async function runGetSendPolicy() {
   if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
   const lines = [
     `Send policy for ${r.from} (${r.localDate}):`,
-    `   cap:             ${r.cap}`,
-    `   sentToday:       ${r.sentToday}`,
-    `   remainingToday:  ${r.remainingToday}`,
-    `   gate:            ${r.gate}`,
-    `   window:          ${r.windowOpen ? 'OPEN' : 'CLOSED'} (${r.windowStartHour}:00–${r.windowEndHour}:00 ${r.tz})`,
-    `   hardCeiling:     ${r.hardCapCeiling}`,
+    `   cap (daily):       ${r.cap}`,
+    `   sentToday:         ${r.sentToday}`,
+    `   remainingToday:    ${r.remainingToday}`,
+    ...(r.weeklyCap != null ? [
+      `   weeklyCap (7d):    ${r.weeklyCap}`,
+      `   sentThisWeek:      ${r.sentThisWeek}`,
+      `   remainingThisWeek: ${r.remainingThisWeek}`,
+    ] : []),
+    `   gate:              ${r.gate}`,
+    `   window:            ${r.windowOpen ? 'OPEN' : 'CLOSED'} (${r.windowStartHour}:00–${r.windowEndHour}:00 ${r.tz})`,
+    `   hardCeiling:       ${r.hardCapCeiling}`,
     ...(r.gate === 'abort'
       ? ['', '⛔ gate=abort — sending is halted for the day (Send Health CRITICAL).']
-      : r.remainingToday === 0
-        ? ['', '⚠️  Cap reached for today — queued items carry to the next window/day. This is the cap, not a stall.']
-        : []),
+      : r.remainingThisWeek === 0
+        ? ['', '⛔ Rolling 7-day weekly cap reached — sending is paused until the trailing-7-day total drops below the cap. This is the cap, not a stall.']
+        : r.remainingToday === 0
+          ? ['', '⚠️  Daily cap reached — queued items carry to the next window/day. This is the cap, not a stall.']
+          : []),
   ];
   return { isError: false, text: lines.join('\n') };
 }

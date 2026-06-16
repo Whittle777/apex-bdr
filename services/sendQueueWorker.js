@@ -20,7 +20,7 @@
 const prisma = require('./database');
 const { getMicrosoftAccessToken } = require('./sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('./bridgeMailer');
-const { getConfig, localDateString, localHour, computeInterval, pickNextDecision, effectiveCap } = require('./sendPacing');
+const { getConfig, localDateString, localHour, computeInterval, pickNextDecision, effectiveCap, WEEK_MS } = require('./sendPacing');
 
 /**
  * Count messages already sent today (in the send tz) for a user. Low daily
@@ -38,6 +38,19 @@ async function countSentToday(userId, now, cfg) {
 }
 
 /**
+ * Count messages sent in the trailing 7 days for a user — the rolling weekly
+ * budget. A simple `sentAt >= now - 7d` lookback (no tz bucketing needed; it's
+ * a span, not a calendar week), so the guarantee is "no more than weeklyCap in
+ * any 7-day window," not "resets Monday."
+ */
+async function countSentThisWeek(userId, now) {
+  const weekStart = new Date(now.getTime() - WEEK_MS);
+  return prisma.outboundQueue.count({
+    where: { userId, status: 'sent', sentAt: { gte: weekStart } },
+  });
+}
+
+/**
  * Summarize the live send policy for one user/day — the numbers the agent
  * needs to tell "stopped because cap" from "stalled". Mirrors exactly what
  * drainQueue enforces: effective cap (per-day policy ?? env default, clamped),
@@ -52,11 +65,15 @@ async function getSendPolicyStatus(userId, now = new Date()) {
   const cap = effectiveCap({ policyCap: policy?.dailyCap, defaultCap: cfg.defaultDailyCap, ceiling: cfg.hardCapCeiling });
   const gate = policy?.gate ?? 'proceed';
   const sentToday = await countSentToday(userId, now, cfg);
+  const sentThisWeek = await countSentThisWeek(userId, now);
   const hour = localHour(now, cfg.tz);
   return {
     cap,
     sentToday,
     remainingToday: Math.max(0, cap - sentToday),
+    weeklyCap: cfg.weeklyCap,
+    sentThisWeek,
+    remainingThisWeek: Math.max(0, cfg.weeklyCap - sentThisWeek),
     gate,
     windowOpen: hour >= cfg.windowStartHour && hour < cfg.windowEndHour,
     tz: cfg.tz,
@@ -105,6 +122,7 @@ async function drainQueue({ now = new Date() } = {}) {
     const dailyCap = effectiveCap({ policyCap: policy?.dailyCap, defaultCap: cfg.defaultDailyCap, ceiling: cfg.hardCapCeiling });
     const gate = policy?.gate ?? 'proceed';
     const sentTodayCount = await countSentToday(userId, now, cfg);
+    const sentThisWeekCount = await countSentThisWeek(userId, now);
 
     const decision = pickNextDecision({
       now,
@@ -114,6 +132,8 @@ async function drainQueue({ now = new Date() } = {}) {
       nextEligibleAt: policy?.nextEligibleAt || null,
       sentTodayCount,
       dailyCap,
+      sentThisWeekCount,
+      weeklyCap: cfg.weeklyCap,
       gate,
       queuedItems: items,
       paceMinMs: cfg.paceMinMs,
@@ -194,6 +214,7 @@ module.exports = {
   computeInterval,
   pickNextDecision,
   countSentToday,
+  countSentThisWeek,
   getSendPolicyStatus,
   drainQueue,
 };
