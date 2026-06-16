@@ -136,15 +136,15 @@ cron.schedule('*/10 * * * *', async () => {
 });
 
 // ── Paced send-queue worker ──────────────────────────────────────────────────
-// Ticks every 15s and sends at most one message per user per tick, spacing the
-// next send by a uniform-random PACE_MIN_SECONDS–PACE_MAX_SECONDS (default
-// 30–90s) via SendPolicy.nextEligibleAt. The 15s tick matches the 15s pacing
-// floor, so actual spacing tracks the configured interval (quantized to 15s)
-// instead of being rounded up to whole minutes. Still only inside the 8am–5pm
-// PT window, under the day's cap + rolling weekly cap, halting if gated `abort`.
+// Ticks every 5s and sends at most one message per user per tick, spacing the
+// next send by a uniform-random PACE_MIN_SECONDS–PACE_MAX_SECONDS via
+// SendPolicy.nextEligibleAt. The 5s tick is fine enough to realize sub-15s
+// spacing (down to the 10s pacing floor), so actual spacing tracks the
+// configured interval (quantized to 5s). Still only inside the 8am–5pm PT
+// window, under the day's cap + rolling weekly cap, halting if gated `abort`.
 // Disable with SEND_QUEUE_ENABLED=0.
 let draining = false; // reentrancy guard — skip a tick if the prior run is still in flight
-cron.schedule('*/15 * * * * *', async () => {
+cron.schedule('*/5 * * * * *', async () => {
   if (draining) return;
   draining = true;
   try {

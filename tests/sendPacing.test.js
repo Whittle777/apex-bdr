@@ -266,9 +266,17 @@ describe('send pacing — resolvePace (interval config + clamps)', () => {
     expect(p.paceMaxSeconds).toBe(90);
   });
 
-  test('clamps a too-low PACE_MIN to the 15s hard floor', () => {
+  test('clamps a too-low PACE_MIN to the hard floor', () => {
     const p = resolvePace({ PACE_MIN_SECONDS: '1', PACE_MAX_SECONDS: '90' });
-    expect(p.paceMinSeconds).toBe(PACE_FLOOR_SECONDS); // 15
+    expect(p.paceMinSeconds).toBe(PACE_FLOOR_SECONDS); // 10
+  });
+
+  test('accepts a 10–15s pace (at/above the floor)', () => {
+    const p = resolvePace({ PACE_MIN_SECONDS: '10', PACE_MAX_SECONDS: '15' });
+    expect(p.paceMinSeconds).toBe(10);
+    expect(p.paceMaxSeconds).toBe(15);
+    expect(p.paceMinMs).toBe(10000);
+    expect(p.paceMaxMs).toBe(15000);
   });
 
   test('clamps a too-high PACE_MAX to the 600s ceiling', () => {
