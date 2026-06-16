@@ -355,13 +355,45 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
   if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
   const counts = Object.entries(r.counts || {}).map(([k, v]) => `${k}=${v}`).join(' ') || '(none)';
   const scope = batchId ? ` (batch ${batchId})` : domain ? ` (@${String(domain).replace(/^@/, '')})` : recipient ? ` (${recipient})` : '';
+  const p = r.policy;
+  const policyLine = p
+    ? `Send policy today (${p.localDate}): cap=${p.cap} sentToday=${p.sentToday} remainingToday=${p.remainingToday} gate=${p.gate} window=${p.windowOpen ? 'OPEN' : 'CLOSED'} (${p.windowStartHour}:00–${p.windowEndHour}:00 ${p.tz}).` +
+      (p.gate === 'abort' ? ' ⛔ gate=abort — sending halted for the day.' : p.remainingToday === 0 ? ' ⚠️ cap reached — remaining items carry to the next window/day.' : '')
+    : null;
   const lines = [
     `Queue${scope}: ${r.total} item(s) — ${counts}`,
+    ...(policyLine ? [policyLine] : []),
     ...r.items.slice(0, 50).map((it) => {
       const id = it.messageId ? ` msgId=${it.messageId.slice(0, 24)}…` : '';
       return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${id}`;
     }),
     ...(r.items.length > 50 ? [`   …and ${r.items.length - 50} more`] : []),
+  ];
+  return { isError: false, text: lines.join('\n') };
+}
+
+/**
+ * Read the day's send policy for the caller's inbox: the effective daily cap,
+ * how many sends have been used today, how many remain, the gate, and whether
+ * the send window is currently open. Use this to tell "stopped because cap"
+ * from "stalled" before assuming the queue is stuck.
+ */
+export async function runGetSendPolicy() {
+  const r = await callBridge('/api/mcp/send-policy', null, 'GET');
+  if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
+  const lines = [
+    `Send policy for ${r.from} (${r.localDate}):`,
+    `   cap:             ${r.cap}`,
+    `   sentToday:       ${r.sentToday}`,
+    `   remainingToday:  ${r.remainingToday}`,
+    `   gate:            ${r.gate}`,
+    `   window:          ${r.windowOpen ? 'OPEN' : 'CLOSED'} (${r.windowStartHour}:00–${r.windowEndHour}:00 ${r.tz})`,
+    `   hardCeiling:     ${r.hardCapCeiling}`,
+    ...(r.gate === 'abort'
+      ? ['', '⛔ gate=abort — sending is halted for the day (Send Health CRITICAL).']
+      : r.remainingToday === 0
+        ? ['', '⚠️  Cap reached for today — queued items carry to the next window/day. This is the cap, not a stall.']
+        : []),
   ];
   return { isError: false, text: lines.join('\n') };
 }
@@ -628,6 +660,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         'failed/cancelled) and, once sent, its messageId / internetMessageId /',
         'conversationId so you can reconcile (e.g. write the Email Log / Send',
         'Health) and thread follow-ups.',
+        '',
+        "When listing (not a single trackingId), the response also reports the day's",
+        'send policy — cap, sentToday, remainingToday, gate, window open/closed — so',
+        'you can tell "stopped because the daily cap was hit" from "stalled". For',
+        'just the policy without the item list, use get_send_policy.',
       ].join('\n'),
       inputSchema: {
         type: 'object',
@@ -639,6 +676,26 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           recipient: { type: 'string', description: 'Show items addressed to this exact email.' },
           domain: { type: 'string', description: 'Show items to this recipient domain, e.g. "amd.com".' },
         },
+      },
+    },
+    {
+      name: 'get_send_policy',
+      description: [
+        "Read the day's outbound send policy for the connected inbox WITHOUT",
+        'listing the queue. Returns the effective daily cap, how many sends have',
+        'been used today (sentToday), how many remain (remainingToday), the gate',
+        '(proceed/warning/abort), and whether the send window is currently open.',
+        '',
+        'Use this to distinguish "the worker stopped because it hit the daily cap"',
+        'from "the queue is stalled" — if remainingToday is 0 (or gate=abort), the',
+        'remaining queued items are waiting for the next window/day by design, not',
+        'stuck. The cap is set per-day from Send Health; raise it by re-enqueuing',
+        "with a higher dailyCap (bounded by the server's hard ceiling).",
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {},
       },
     },
     {
@@ -712,6 +769,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     outcome = await runEnqueueBatch(args || {});
   } else if (name === 'check_email_queue') {
     outcome = await runCheckEmailQueue(args || {});
+  } else if (name === 'get_send_policy') {
+    outcome = await runGetSendPolicy(args || {});
   } else if (name === 'manage_queued_email') {
     outcome = await runManageQueuedEmail(args || {});
   } else if (name === 'update_queued_email') {

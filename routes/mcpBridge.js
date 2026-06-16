@@ -25,6 +25,7 @@ const prisma = require('../services/database');
 const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('../services/bridgeMailer');
 const { localDateString, getConfig } = require('../services/sendPacing');
+const { getSendPolicyStatus } = require('../services/sendQueueWorker');
 const { buildSelectorWhere, actionStatuses, targetStatus, partitionUpdate } = require('../services/queueOps');
 const {
   MAX_BATCH_SIZE, REPLAY_WINDOW_MS, DEFAULT_DEDUPE_SCOPE,
@@ -270,6 +271,9 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
   if (dailyCap != null && (!Number.isInteger(dailyCap) || dailyCap < 0)) {
     return res.status(400).json({ ok: false, error: '"dailyCap" must be a non-negative integer' });
   }
+  if (dailyCap != null && dailyCap > getConfig().hardCapCeiling) {
+    return res.status(400).json({ ok: false, error: `"dailyCap" (${dailyCap}) exceeds the hard safety ceiling of ${getConfig().hardCapCeiling}. Raise SEND_HARD_CAP_CEILING if this is intentional.` });
+  }
   const scheduledForDate = v.scheduledForMs != null ? new Date(v.scheduledForMs) : null;
 
   let cred;
@@ -371,6 +375,9 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
   }
   if (dailyCap != null && (!Number.isInteger(dailyCap) || dailyCap < 0)) {
     return res.status(400).json({ ok: false, error: '"dailyCap" must be a non-negative integer' });
+  }
+  if (dailyCap != null && dailyCap > getConfig().hardCapCeiling) {
+    return res.status(400).json({ ok: false, error: `"dailyCap" (${dailyCap}) exceeds the hard safety ceiling of ${getConfig().hardCapCeiling}. Raise SEND_HARD_CAP_CEILING if this is intentional.` });
   }
   if (!['queue', 'queue+sent', 'none'].includes(dedupeScope)) {
     return res.status(400).json({ ok: false, error: '"dedupeScope" must be one of: queue | queue+sent | none' });
@@ -506,9 +513,35 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
       },
     });
     const counts = items.reduce((acc, it) => ((acc[it.status] = (acc[it.status] || 0) + 1), acc), {});
-    return res.json({ ok: true, total: items.length, counts, items });
+
+    // Surface the day's send policy so "stopped because cap" is never invisible
+    // again. Resolve the policy user: per-user token → that user; shared token →
+    // first connected Microsoft account (best-effort, never fails the listing).
+    let policy = null;
+    try {
+      const cred = await resolveCred(req);
+      if (cred) policy = await getSendPolicyStatus(cred.userId);
+    } catch (err) {
+      console.warn('[mcpBridge] send-policy lookup for queue failed:', err.message);
+    }
+
+    return res.json({ ok: true, total: items.length, counts, policy, items });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/send-policy — the day's effective send policy for the caller's
+// inbox: cap, sentToday, remainingToday, gate, and whether the window is open.
+// Lets the agent read the cap directly without inspecting the queue.
+router.get('/send-policy', requireBridgeAuth, async (req, res) => {
+  try {
+    const cred = await resolveCred(req);
+    if (!cred) return res.status(412).json({ ok: false, error: credError(req) });
+    const policy = await getSendPolicyStatus(cred.userId);
+    return res.json({ ok: true, from: cred.email, ...policy });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Send-policy lookup failed: ${err.message}` });
   }
 });
 
