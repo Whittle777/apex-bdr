@@ -37,24 +37,54 @@ function effectiveCap({ policyCap, defaultCap, ceiling = DEFAULT_HARD_CAP_CEILIN
   return clampCap(base, ceiling);
 }
 
+// Inter-send pacing bounds (seconds). The worker waits a uniform-random delay
+// in [paceMin, paceMax] between sends so the cadence isn't robotic. Env-tunable
+// via PACE_MIN_SECONDS / PACE_MAX_SECONDS without a redeploy.
+const DEFAULT_PACE_MIN_SECONDS = 30;
+const DEFAULT_PACE_MAX_SECONDS = 90;
+// HARD floor: never burst faster than 1 send / 15s from one mailbox regardless
+// of env — a typo (e.g. PACE_MIN_SECONDS=1) can't torch the sending domain.
+const PACE_FLOOR_SECONDS = 15;
+const PACE_CEILING_SECONDS = 600;
+
+const numOr = (v, d) => (v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v) : d);
+
+/**
+ * Resolve + validate the pacing bounds from env. PURE (env injected for tests).
+ * Clamps each bound to [15s, 600s] and swaps if min > max, so a misconfigured
+ * pair can never produce a sub-floor or inverted interval.
+ * @returns {{ paceMinSeconds, paceMaxSeconds, paceMinMs, paceMaxMs }}
+ */
+function resolvePace(env = process.env) {
+  let min = numOr(env.PACE_MIN_SECONDS, DEFAULT_PACE_MIN_SECONDS);
+  let max = numOr(env.PACE_MAX_SECONDS, DEFAULT_PACE_MAX_SECONDS);
+  const clamp = (s) => Math.min(PACE_CEILING_SECONDS, Math.max(PACE_FLOOR_SECONDS, Math.floor(s)));
+  min = clamp(min);
+  max = clamp(max);
+  if (min > max) [min, max] = [max, min]; // reversed env → swap, don't error
+  return { paceMinSeconds: min, paceMaxSeconds: max, paceMinMs: min * 1000, paceMaxMs: max * 1000 };
+}
+
 // Config (env-driven, tunable on Railway without redeploy). Read here so the
 // route and worker share one source of defaults.
 function getConfig() {
-  const num = (v, d) => (v != null && v !== '' && !Number.isNaN(Number(v)) ? Number(v) : d);
+  const num = numOr;
   const hardCapCeiling = num(process.env.SEND_HARD_CAP_CEILING, DEFAULT_HARD_CAP_CEILING);
   const weeklyHardCeiling = num(process.env.SEND_WEEKLY_HARD_CEILING, DEFAULT_WEEKLY_HARD_CEILING);
   // Accept the spec name DAILY_SEND_CAP as an alias for SEND_DEFAULT_DAILY_CAP;
   // the former wins if both are set. Clamped so an env typo can't exceed the ceiling.
   const rawDefaultCap = num(process.env.DAILY_SEND_CAP, num(process.env.SEND_DEFAULT_DAILY_CAP, 150));
   const rawWeeklyCap = num(process.env.WEEKLY_SEND_CAP, DEFAULT_WEEKLY_CAP);
+  const pace = resolvePace(process.env);
   return {
     enabled: process.env.SEND_QUEUE_ENABLED !== '0', // default ON; set 0 to disable
     tz: process.env.SEND_TIMEZONE || 'America/Los_Angeles',
     windowStartHour: num(process.env.SEND_WINDOW_START_HOUR, 8),
     windowEndHour: num(process.env.SEND_WINDOW_END_HOUR, 17),
-    paceMinMs: num(process.env.SEND_PACE_MIN_MS, 60000), // 1 min
-    paceMaxMs: num(process.env.SEND_PACE_MAX_MS, 120000), // 2 min
-    jitterMs: num(process.env.SEND_JITTER_MS, 30000), // ±30 s
+    paceMinSeconds: pace.paceMinSeconds,
+    paceMaxSeconds: pace.paceMaxSeconds,
+    paceMinMs: pace.paceMinMs,
+    paceMaxMs: pace.paceMaxMs,
     hardCapCeiling,
     defaultDailyCap: clampCap(rawDefaultCap, hardCapCeiling),
     weeklyHardCeiling,
@@ -75,14 +105,13 @@ function localHour(date, tz) {
 }
 
 /**
- * Interval (ms) until the next send: a random pick in [paceMinMs, paceMaxMs]
- * plus ±jitterMs, floored at 0.
+ * Interval (ms) until the next send: a uniform-random pick in
+ * [paceMinMs, paceMaxMs]. Random per send (not fixed) so the cadence isn't
+ * robotic — randomized spacing is itself a deliverability signal.
  */
-function computeInterval({ paceMinMs, paceMaxMs, jitterMs, rng = Math.random }) {
+function computeInterval({ paceMinMs, paceMaxMs, rng = Math.random }) {
   const span = Math.max(0, paceMaxMs - paceMinMs);
-  const base = paceMinMs + Math.floor(rng() * (span + 1));
-  const jitter = Math.round((rng() * 2 - 1) * jitterMs);
-  return Math.max(0, base + jitter);
+  return paceMinMs + Math.floor(rng() * (span + 1));
 }
 
 /**
@@ -106,7 +135,6 @@ function pickNextDecision({
   queuedItems,
   paceMinMs,
   paceMaxMs,
-  jitterMs,
   rng = Math.random,
 }) {
   if (gate === 'abort') return { action: 'aborted' };
@@ -134,7 +162,7 @@ function pickNextDecision({
     return { action: 'wait', nextEligibleAt: new Date(nextEligibleAt) };
   }
 
-  const interval = computeInterval({ paceMinMs, paceMaxMs, jitterMs, rng });
+  const interval = computeInterval({ paceMinMs, paceMaxMs, rng });
   return { action: 'send', item: eligible[0], nextEligibleAt: new Date(now.getTime() + interval) };
 }
 
@@ -142,9 +170,14 @@ module.exports = {
   DEFAULT_HARD_CAP_CEILING,
   DEFAULT_WEEKLY_CAP,
   DEFAULT_WEEKLY_HARD_CEILING,
+  DEFAULT_PACE_MIN_SECONDS,
+  DEFAULT_PACE_MAX_SECONDS,
+  PACE_FLOOR_SECONDS,
+  PACE_CEILING_SECONDS,
   WEEK_MS,
   clampCap,
   effectiveCap,
+  resolvePace,
   getConfig,
   localDateString,
   localHour,

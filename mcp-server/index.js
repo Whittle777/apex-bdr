@@ -190,7 +190,7 @@ export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc,
 /**
  * Enqueue an email for PACED sending. Unlike send_email, this does not send
  * immediately — it adds the message to the connector's send queue, which
- * drains at a human pace (every few minutes) inside the send window and under
+ * drains at a human pace (a random 30–90s between sends) inside the send window and under
  * the day's cap. Use for batches so the mailbox doesn't burst-send. Optional
  * inReplyToMessageId makes it a paced threaded reply.
  */
@@ -359,6 +359,7 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
   const policyLine = p
     ? `Send policy today (${p.localDate}): cap=${p.cap} sentToday=${p.sentToday} remainingToday=${p.remainingToday}` +
       (p.weeklyCap != null ? ` | weeklyCap=${p.weeklyCap} sentThisWeek=${p.sentThisWeek} remainingThisWeek=${p.remainingThisWeek} (rolling 7d)` : '') +
+      (p.paceMinSeconds != null ? ` | pace=${p.paceMinSeconds}–${p.paceMaxSeconds}s` : '') +
       ` | gate=${p.gate} window=${p.windowOpen ? 'OPEN' : 'CLOSED'} (${p.windowStartHour}:00–${p.windowEndHour}:00 ${p.tz}).` +
       (p.gate === 'abort'
         ? ' ⛔ gate=abort — sending halted for the day.'
@@ -401,6 +402,7 @@ export async function runGetSendPolicy() {
     ] : []),
     `   gate:              ${r.gate}`,
     `   window:            ${r.windowOpen ? 'OPEN' : 'CLOSED'} (${r.windowStartHour}:00–${r.windowEndHour}:00 ${r.tz})`,
+    ...(r.paceMinSeconds != null ? [`   pace:              ${r.paceMinSeconds}–${r.paceMaxSeconds}s random between sends`] : []),
     `   hardCeiling:       ${r.hardCapCeiling}`,
     ...(r.gate === 'abort'
       ? ['', '⛔ gate=abort — sending is halted for the day (Send Health CRITICAL).']
@@ -572,8 +574,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description: [
         'Enqueue an email for PACED sending through the apex-bdr app (Outlook).',
         'Unlike send_email, this does NOT send immediately — it adds the message',
-        'to a server-side queue that drains at a human pace (every few minutes),',
-        'only inside the send window (8am–5pm PT), with jitter, and never beyond',
+        'to a server-side queue that drains at a human pace (a random 30–90s',
+        'between sends), only inside the send window (8am–5pm PT), and never beyond',
         "the day's cap. Use this for BATCHES so the mailbox doesn't burst-send",
         '(bursting is a top deliverability/spam trigger).',
         '',
