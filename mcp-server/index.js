@@ -26,6 +26,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { readFileSync } from 'node:fs';
 
 const BRIDGE_URL   = (process.env.MCP_BRIDGE_URL   || 'http://localhost:3000').replace(/\/+$/, '');
 const BRIDGE_TOKEN = process.env.MCP_BRIDGE_TOKEN  || '';
@@ -242,6 +243,88 @@ export async function runEnqueueEmail({
     isError: true,
     text: `❌ Enqueue failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}`,
   };
+}
+
+/**
+ * Read a Cowork spool file into a BatchItem[]. Accepts either a JSON array or
+ * line-delimited JSON (NDJSON), one record per line. The spool lives on the
+ * machine running THIS MCP server (same place the drafting agents wrote it),
+ * which is why the read happens here, not on the bridge — the app server (e.g.
+ * Railway) has no access to that file.
+ */
+function loadSpoolFile(spoolPath) {
+  const raw = readFileSync(spoolPath, 'utf8').trim();
+  if (!raw) return [];
+  if (raw[0] === '[') {
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) throw new Error('spool JSON must be an array of items');
+    return arr;
+  }
+  return raw.split(/\r?\n/).filter((l) => l.trim()).map((line, i) => {
+    try { return JSON.parse(line); }
+    catch (e) { throw new Error(`spool line ${i + 1} is not valid JSON: ${e.message}`); }
+  });
+}
+
+/**
+ * Enqueue MANY messages in ONE call (one approval prompt, one reconcilable
+ * result, retry-safe). Either pass items[] inline or a spoolPath to a JSON
+ * array / NDJSON file. The bridge dedups per recipient, replays on
+ * idempotencyKey, and returns a per-item accepted/skipped/rejected report with
+ * trackingIds and echoed clientRefs. Pacing is unchanged — a big batch still
+ * drains slowly over the send window(s).
+ */
+export async function runEnqueueBatch({
+  items, spoolPath, batchId, idempotencyKey, gate, dailyCap, from, defaultScheduledFor, dedupeScope,
+}) {
+  let batchItems = items;
+  if (ok(spoolPath)) {
+    try {
+      batchItems = loadSpoolFile(spoolPath);
+    } catch (e) {
+      return { isError: true, text: `❌ Could not read spool file "${spoolPath}": ${e.message}` };
+    }
+  }
+  if (!Array.isArray(batchItems) || batchItems.length === 0) {
+    return { isError: true, text: '❌ Provide "items" (a non-empty array) or "spoolPath" to a JSON-array / NDJSON file of items.' };
+  }
+  if (gate != null && !['proceed', 'warning', 'abort'].includes(gate)) {
+    return { isError: true, text: '❌ "gate" must be proceed | warning | abort' };
+  }
+
+  log(`enqueue_batch: ${batchItems.length} item(s)${ok(spoolPath) ? ` from ${spoolPath}` : ''}, batch=${batchId || '(auto)'}${idempotencyKey ? `, key=${idempotencyKey}` : ''}`);
+  const result = await callBridge('/api/mcp/enqueue-batch', {
+    items: batchItems, batchId, idempotencyKey, gate, dailyCap, from, defaultScheduledFor, dedupeScope,
+  });
+  if (!result.ok) {
+    warn('enqueue_batch failed:', result.error);
+    return { isError: true, text: `❌ Batch enqueue failed: ${result.error}${result.httpStatus ? ` (HTTP ${result.httpStatus})` : ''}` };
+  }
+
+  const c = result.counts || {};
+  const all = result.items || [];
+  const rejected = all.filter((i) => i.status === 'rejected');
+  const skipped = all.filter((i) => i.status === 'skipped_duplicate');
+  const fmt = (i) => `   • ${i.clientRef ? `[${i.clientRef}] ` : ''}${i.to || '(reply)'}${i.reason ? ` — ${i.reason}` : ''}`;
+  const lines = [
+    result.replayed
+      ? '↩️  Replayed — this idempotencyKey was already processed; no new items were queued.'
+      : '📥 Batch enqueued (paced send — items drain over the send window, not now).',
+    `   batchId:   ${result.batchId}`,
+    `   accepted:  ${c.accepted || 0}`,
+    `   skipped:   ${c.skippedDuplicate || 0} (already queued/sent or duplicate in batch)`,
+    `   rejected:  ${c.rejected || 0}`,
+  ];
+  if (rejected.length) {
+    lines.push('', `Rejected (${rejected.length}) — surface these to the user:`, ...rejected.slice(0, 50).map(fmt));
+    if (rejected.length > 50) lines.push(`   …and ${rejected.length - 50} more`);
+  }
+  if (skipped.length) {
+    lines.push('', `Skipped as duplicate (${skipped.length}):`, ...skipped.slice(0, 25).map(fmt));
+    if (skipped.length > 25) lines.push(`   …and ${skipped.length - 25} more`);
+  }
+  lines.push('', `Poll with check_email_queue (batchId="${result.batchId}") to get per-item status + messageId once sent.`);
+  return { isError: false, text: lines.join('\n') };
 }
 
 /**
@@ -476,6 +559,68 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'enqueue_batch',
+      description: [
+        'Enqueue MANY emails for PACED sending in ONE call — use this for any',
+        'batch >1 instead of calling enqueue_email N times. One tool call = one',
+        'approval prompt (not N), and the server owns dedup, partial-failure, and',
+        'retry-safety so the agent never has to.',
+        '',
+        'Pass items[] inline, OR a spoolPath to a JSON-array / NDJSON file of',
+        'items (read locally by this MCP server — ideal for large batches so you',
+        "don't inline hundreds of bodies into the prompt).",
+        '',
+        'Behavior:',
+        '- Dedup per recipient (default scope queue+sent) so re-running never',
+        '  double-sends; cancelled/failed items do NOT block a resend.',
+        '- idempotencyKey makes the whole call replay-safe: a retry with the same',
+        '  key returns the SAME result and queues nothing new. Pass a stable key',
+        '  per logical batch (e.g. "bdr_20260616_full_v1").',
+        '- gate="abort" (Send Health CRITICAL) rejects the ENTIRE batch.',
+        '- One bad record (missing body, bad email, blocked domain) is returned as',
+        '  rejected with a reason and never blocks the valid ones.',
+        '',
+        'Returns counts + a per-item report (accepted/skipped_duplicate/rejected)',
+        'with trackingId and your echoed clientRef, plus a batchId. Pacing is',
+        'unchanged — a big batch still drains slowly over the send window(s).',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          items: {
+            type: 'array',
+            description: 'The messages to queue (1..1000). Omit if using spoolPath.',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                to: { type: 'string', description: 'Recipient email (required for a new send; optional for a reply).' },
+                subject: { type: 'string', description: 'Subject (required for a new send).' },
+                body: { type: 'string', description: 'Body, plain text or HTML (required).' },
+                cc: { type: 'string', description: 'Optional CC.' },
+                bcc: { type: 'string', description: 'Optional BCC.' },
+                inReplyToMessageId: { type: 'string', description: 'If set, a paced threaded reply (then to/subject optional).' },
+                replyAll: { type: 'boolean', description: 'Reply to all (reply items only).' },
+                includeOriginalBody: { type: 'boolean', description: 'Quote the original (reply items only). Default true.' },
+                scheduledFor: { type: 'string', description: 'Per-item ISO override of defaultScheduledFor.' },
+                clientRef: { type: 'string', description: 'Your key (e.g. Prospect ID "P0214"), echoed back in the result so you can map results to rows without re-matching on email.' },
+              },
+              required: ['body'],
+            },
+          },
+          spoolPath: { type: 'string', description: 'Path (on this MCP server\'s machine) to a JSON-array or NDJSON spool file of items. Alternative to inline items.' },
+          batchId: { type: 'string', description: 'Group id for the whole batch (for polling/reconciliation). Server mints one if omitted.' },
+          idempotencyKey: { type: 'string', description: 'STRONGLY recommended. Stable key per logical batch; a retry with the same key replays the stored result and queues nothing new.' },
+          gate: { type: 'string', enum: ['proceed', 'warning', 'abort'], description: 'Day gate from Send Health. abort=reject the whole batch; warning/proceed=accept (cap encodes WARNING).' },
+          dailyCap: { type: 'integer', description: 'Day cap for this inbox (from Send Health). Sets the day policy.' },
+          from: { type: 'string', description: 'Optional connected Microsoft account. Ignored under a per-user token.' },
+          defaultScheduledFor: { type: 'string', description: 'ISO timestamp — earliest any item may send (per-item scheduledFor overrides). Still paced/windowed.' },
+          dedupeScope: { type: 'string', enum: ['queue', 'queue+sent', 'none'], description: 'Dedup scope. queue+sent (default) skips recipients already queued/paused/sending/sent; queue allows re-sending to someone already sent (e.g. sequence step 2); none disables dedup (dangerous).' },
+        },
+      },
+    },
+    {
       name: 'check_email_queue',
       description: [
         'Check the paced send queue. Pass batchId to see a whole batch, or',
@@ -563,6 +708,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     outcome = await runReplyToEmail(args || {});
   } else if (name === 'enqueue_email') {
     outcome = await runEnqueueEmail(args || {});
+  } else if (name === 'enqueue_batch') {
+    outcome = await runEnqueueBatch(args || {});
   } else if (name === 'check_email_queue') {
     outcome = await runCheckEmailQueue(args || {});
   } else if (name === 'manage_queued_email') {

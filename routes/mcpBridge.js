@@ -26,6 +26,11 @@ const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('../services/bridgeMailer');
 const { localDateString, getConfig } = require('../services/sendPacing');
 const { buildSelectorWhere, actionStatuses, targetStatus, partitionUpdate } = require('../services/queueOps');
+const {
+  MAX_BATCH_SIZE, REPLAY_WINDOW_MS, DEFAULT_DEDUPE_SCOPE,
+  getBlockedDomains, dedupeStatesFor, rowDedupeKey,
+  validateItem, decideBatch, countDecisions,
+} = require('../services/enqueueBatch');
 
 // Loose RFC 5322-ish check — good enough to catch obvious typos.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -89,6 +94,38 @@ function credError(req, from) {
   if (req.mcpUser) return `User ${req.mcpUser.email} has not connected a Microsoft 365 account yet. Sign in with Microsoft in Integrations first.`;
   if (from) return `No Microsoft 365 credential found for "${from}"`;
   return 'No Microsoft 365 account is connected. Open the app and sign in with Microsoft first.';
+}
+
+// Assemble a BatchResult from PURE decisions + the trackingIds minted for the
+// accepted rows. clientRef is echoed back only when the caller supplied it.
+function assembleBatchResult(batchId, decisions, trackingByIndex) {
+  return {
+    batchId,
+    counts: countDecisions(decisions),
+    items: decisions.map((d) => ({
+      ...(d.clientRef != null ? { clientRef: d.clientRef } : {}),
+      to: d.to,
+      status: d.status,
+      ...(d.status === 'accepted' && trackingByIndex[d.index] ? { trackingId: trackingByIndex[d.index] } : {}),
+      ...(d.reason ? { reason: d.reason } : {}),
+    })),
+  };
+}
+
+// Persist the BatchResult under the caller's idempotencyKey so a retry replays
+// it instead of re-queuing. Best-effort: a store failure doesn't fail the batch
+// (per-recipient dedup is the real double-send guard).
+async function storeBatchReceipt(idempotencyKey, userId, batchId, result) {
+  if (!idempotencyKey) return;
+  try {
+    await prisma.batchReceipt.upsert({
+      where: { idempotencyKey },
+      update: { result: JSON.stringify(result), batchId },
+      create: { idempotencyKey, userId, batchId, result: JSON.stringify(result) },
+    });
+  } catch (err) {
+    console.warn('[mcpBridge] batch receipt store failed:', err.message);
+  }
 }
 
 const CAPTURE_WARNING =
@@ -218,15 +255,14 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
   } = req.body || {};
 
   const isReply = ok(inReplyToMessageId);
-  if (isReply) {
-    if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
-  } else {
-    if (!isEmail(to)) return res.status(400).json({ ok: false, error: '"to" must be a valid email' });
-    if (!ok(subject)) return res.status(400).json({ ok: false, error: '"subject" is required' });
-    if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
+  // Shared per-item validation (the SAME routine enqueue_batch loops) + the
+  // server-side blocklist, so single and batch sends can never diverge on what
+  // they accept (spec §8).
+  const v = validateItem({ to, subject, body, cc, bcc, inReplyToMessageId, scheduledFor }, { blockedDomains: getBlockedDomains() });
+  if (!v.valid) {
+    const code = v.reason === 'blocked domain' ? 422 : 400;
+    return res.status(code).json({ ok: false, status: 'rejected', reason: v.reason, error: `Rejected: ${v.reason}` });
   }
-  if (cc && !isEmail(cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
-  if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
   if (gate != null && !['proceed', 'warning', 'abort'].includes(gate)) {
     return res.status(400).json({ ok: false, error: '"gate" must be one of: proceed | warning | abort' });
@@ -234,11 +270,7 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
   if (dailyCap != null && (!Number.isInteger(dailyCap) || dailyCap < 0)) {
     return res.status(400).json({ ok: false, error: '"dailyCap" must be a non-negative integer' });
   }
-  let scheduledForDate = null;
-  if (scheduledFor != null) {
-    scheduledForDate = new Date(scheduledFor);
-    if (Number.isNaN(scheduledForDate.getTime())) return res.status(400).json({ ok: false, error: '"scheduledFor" must be an ISO date' });
-  }
+  const scheduledForDate = v.scheduledForMs != null ? new Date(v.scheduledForMs) : null;
 
   let cred;
   try {
@@ -259,6 +291,15 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
         where: { userId_localDate: { userId: cred.userId, localDate } },
         update: { ...(dailyCap != null ? { dailyCap } : {}), ...(gate != null ? { gate } : {}) },
         create: { userId: cred.userId, localDate, dailyCap: dailyCap ?? cfg.defaultDailyCap, gate: gate ?? 'proceed' },
+      });
+    }
+
+    // gate=abort (Send Health CRITICAL) halts the day — record the gate but
+    // queue nothing. Matches enqueue_batch, which rejects the whole batch.
+    if (gate === 'abort') {
+      return res.status(409).json({
+        ok: false, status: 'rejected', reason: 'gate=abort',
+        error: 'gate=abort — sending is halted for today (Send Health CRITICAL). Nothing was queued.',
       });
     }
 
@@ -302,6 +343,144 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
   } catch (err) {
     console.error('[mcpBridge] enqueue failed:', err.message);
     return res.status(500).json({ ok: false, error: `Enqueue failed: ${err.message}` });
+  }
+});
+
+// POST /api/mcp/enqueue-batch — enqueue MANY messages in ONE call. One approval
+// prompt, one reconcilable result, no double-sends on retry. Loops the same
+// validate + persist path as /enqueue-email; adds server-side dedup, batch
+// self-dedup, idempotency replay, and a per-item accepted/skipped/rejected
+// report. Pacing/window/cap are unchanged — this only decides what enters the
+// queue. Body: { items[], batchId?, idempotencyKey?, gate?, dailyCap?, from?,
+//                defaultScheduledFor?, dedupeScope? }
+router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
+  const {
+    items, batchId: batchIdIn, idempotencyKey, gate, dailyCap, from,
+    defaultScheduledFor, dedupeScope = DEFAULT_DEDUPE_SCOPE,
+  } = req.body || {};
+
+  // ── Top-level validation (whole-call shape) ──────────────────────────────
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ ok: false, error: '"items" must be a non-empty array' });
+  }
+  if (items.length > MAX_BATCH_SIZE) {
+    return res.status(400).json({ ok: false, error: `Batch too large: ${items.length} items (max ${MAX_BATCH_SIZE}).` });
+  }
+  if (gate != null && !['proceed', 'warning', 'abort'].includes(gate)) {
+    return res.status(400).json({ ok: false, error: '"gate" must be one of: proceed | warning | abort' });
+  }
+  if (dailyCap != null && (!Number.isInteger(dailyCap) || dailyCap < 0)) {
+    return res.status(400).json({ ok: false, error: '"dailyCap" must be a non-negative integer' });
+  }
+  if (!['queue', 'queue+sent', 'none'].includes(dedupeScope)) {
+    return res.status(400).json({ ok: false, error: '"dedupeScope" must be one of: queue | queue+sent | none' });
+  }
+  if (from && !isEmail(from)) {
+    return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
+  }
+  let defaultScheduledForDate = null;
+  if (defaultScheduledFor != null) {
+    defaultScheduledForDate = new Date(defaultScheduledFor);
+    if (Number.isNaN(defaultScheduledForDate.getTime())) {
+      return res.status(400).json({ ok: false, error: '"defaultScheduledFor" must be an ISO date' });
+    }
+  }
+
+  let cred;
+  try {
+    cred = await resolveCred(req, from);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
+  }
+  if (!cred) return res.status(412).json({ ok: false, error: credError(req, from) });
+
+  // ── Idempotency replay: same key within the window → return stored result ─
+  if (ok(idempotencyKey)) {
+    try {
+      const receipt = await prisma.batchReceipt.findUnique({ where: { idempotencyKey } });
+      if (receipt && receipt.userId === cred.userId &&
+          (Date.now() - new Date(receipt.createdAt).getTime()) < REPLAY_WINDOW_MS) {
+        return res.json({ ok: true, replayed: true, ...JSON.parse(receipt.result) });
+      }
+    } catch (err) {
+      console.warn('[mcpBridge] idempotency lookup failed (processing fresh):', err.message);
+    }
+  }
+
+  const cfg = getConfig();
+  const localDate = localDateString(new Date(), cfg.tz);
+  const batchId = ok(batchIdIn) ? String(batchIdIn) : `b_${crypto.randomUUID()}`;
+  const blockedDomains = getBlockedDomains();
+
+  try {
+    // Record today's policy (cap/gate from Send Health), same as single-send.
+    if (dailyCap != null || gate != null) {
+      await prisma.sendPolicy.upsert({
+        where: { userId_localDate: { userId: cred.userId, localDate } },
+        update: { ...(dailyCap != null ? { dailyCap } : {}), ...(gate != null ? { gate } : {}) },
+        create: { userId: cred.userId, localDate, dailyCap: dailyCap ?? cfg.defaultDailyCap, gate: gate ?? 'proceed' },
+      });
+    }
+
+    // gate=abort → reject the WHOLE batch, accept none. Still returns a full
+    // per-item report so the agent can surface it.
+    if (gate === 'abort') {
+      const { decisions } = decideBatch({ items, existingKeys: new Set(), blockedDomains, dedupeScope, gate });
+      const result = assembleBatchResult(batchId, decisions, {});
+      await storeBatchReceipt(idempotencyKey, cred.userId, batchId, result);
+      console.log(`[mcpBridge] enqueue_batch ${batchId} (user ${cred.userId}) gate=abort — rejected all ${items.length}`);
+      return res.json({ ok: true, ...result });
+    }
+
+    // Build the set of dedupe keys already present in the queue for this user
+    // under the scoped statuses, so decideBatch can flag duplicates.
+    const states = dedupeStatesFor(dedupeScope);
+    let existingKeys = new Set();
+    if (states.length) {
+      const rows = await prisma.outboundQueue.findMany({
+        where: { userId: cred.userId, status: { in: states } },
+        select: { to: true, inReplyToMessageId: true },
+      });
+      existingKeys = new Set(rows.map(rowDedupeKey));
+    }
+
+    const { decisions } = decideBatch({ items, existingKeys, blockedDomains, dedupeScope, gate });
+
+    // Persist accepted items one-by-one (so a mid-batch crash leaves the
+    // already-persisted rows queued; an idempotencyKey replay finishes the rest
+    // without re-queuing them).
+    const trackingByIndex = {};
+    for (const d of decisions) {
+      if (d.status !== 'accepted') continue;
+      const item = items[d.index];
+      const trackingId = `q_${crypto.randomUUID()}`;
+      const scheduledForDate = d.scheduledForMs != null ? new Date(d.scheduledForMs) : defaultScheduledForDate;
+      await prisma.outboundQueue.create({
+        data: {
+          userId: cred.userId,
+          trackingId,
+          to: item.to || '',
+          subject: item.subject || '',
+          body: item.body || '',
+          cc: item.cc || null,
+          bcc: item.bcc || null,
+          inReplyToMessageId: item.inReplyToMessageId || null,
+          replyAll: !!item.replyAll,
+          includeOriginalBody: item.includeOriginalBody !== false,
+          batchId,
+          scheduledFor: scheduledForDate || null,
+        },
+      });
+      trackingByIndex[d.index] = trackingId;
+    }
+
+    const result = assembleBatchResult(batchId, decisions, trackingByIndex);
+    await storeBatchReceipt(idempotencyKey, cred.userId, batchId, result);
+    console.log(`[mcpBridge] enqueue_batch ${batchId} (user ${cred.userId}${ok(idempotencyKey) ? `, key ${idempotencyKey}` : ''}): accepted=${result.counts.accepted} skipped=${result.counts.skippedDuplicate} rejected=${result.counts.rejected}`);
+    return res.json({ ok: true, ...result });
+  } catch (err) {
+    console.error('[mcpBridge] enqueue_batch failed:', err.message);
+    return res.status(500).json({ ok: false, error: `Enqueue batch failed: ${err.message}` });
   }
 });
 

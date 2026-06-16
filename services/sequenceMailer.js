@@ -29,6 +29,11 @@ const prisma = require('./database');
  * Get a fresh Microsoft Graph access token for a user.
  * Uses the stored refresh token + shared Azure app credentials from env vars.
  */
+// Single-tenant: scope the Microsoft token endpoint to our Entra tenant via
+// MICROSOFT_TENANT_ID (same env var routes/microsoftOAuth.js uses). Falls back
+// to 'common' only when the env var is unset (local dev).
+const MS_TENANT = process.env.MICROSOFT_TENANT_ID || 'common';
+
 async function getMicrosoftAccessToken(userId) {
   const cred = await prisma.integrationCredential.findUnique({
     where: { provider_userId: { provider: 'microsoft', userId } },
@@ -46,7 +51,7 @@ async function getMicrosoftAccessToken(userId) {
     scope:         'https://graph.microsoft.com/Mail.Send https://graph.microsoft.com/Mail.Read offline_access',
   });
   const res = await axios.post(
-    'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+    `https://login.microsoftonline.com/${MS_TENANT}/oauth2/v2.0/token`,
     params.toString(),
     { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
   );

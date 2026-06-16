@@ -336,3 +336,19 @@ model SendPolicy {
 
   @@unique([userId, localDate])
 }
+
+// Replay guard for enqueue_batch. A caller-supplied idempotencyKey maps to the
+// BatchResult produced the first time that key was processed; a retry with the
+// same key returns the stored result instead of re-queuing. `result` holds the
+// JSON-serialized BatchResult. Rows older than the replay window are ignored
+// (see services/enqueueBatch.js REPLAY_WINDOW_MS) and may be pruned later.
+model BatchReceipt {
+  id             Int      @id @default(autoincrement())
+  idempotencyKey String   @unique
+  userId         Int
+  batchId        String?
+  result         String // JSON-serialized BatchResult
+  createdAt      DateTime @default(now())
+
+  @@index([userId, createdAt])
+}

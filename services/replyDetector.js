@@ -26,8 +26,11 @@ const {
 } = require('./enrollmentService');
 
 const prisma = require('./database');
-// In-memory last-check timestamps (survives only for the process lifetime — fine for dev)
-const lastCheckTimes = { microsoft: null, google: null };
+// In-memory last-check timestamps (survives only for the process lifetime — fine for dev).
+// Keyed PER credential (`microsoft:<id>` / `google:<id>`) so that scanning
+// multiple connected mailboxes in one run doesn't let the first user's scan
+// advance a shared watermark and starve every subsequent user's scan window.
+const lastCheckTimes = {};
 
 // ─── OOO Detection Patterns ──────────────────────────────────────────────────
 
@@ -292,15 +295,17 @@ async function detectRepliesViaGraph(cred) {
   try {
     accessToken = await refreshGraphToken(cred);
   } catch (err) {
-    console.error('[Reply Detector] Graph token refresh failed:', err.response?.data?.error_description || err.message);
+    const who = cred.email || `user ${cred.userId}`;
+    console.error(`[Reply Detector] Graph token refresh failed for ${who}:`, (err.response?.data?.error_description || err.message || '').split('\n')[0]);
     return;
   }
 
-  const since = lastCheckTimes.microsoft
-    ? lastCheckTimes.microsoft.toISOString()
+  const wmKey = `microsoft:${cred.id}`;
+  const since = lastCheckTimes[wmKey]
+    ? lastCheckTimes[wmKey].toISOString()
     : new Date(Date.now() - 30 * 60 * 1000).toISOString(); // first run: 30 min lookback
 
-  lastCheckTimes.microsoft = new Date();
+  lastCheckTimes[wmKey] = new Date();
 
   let messages = [];
   try {
@@ -358,11 +363,12 @@ async function detectRepliesViaGraph(cred) {
 // ─── Gmail IMAP Polling ───────────────────────────────────────────────────────
 
 async function detectRepliesViaIMAP(cred) {
-  const since = lastCheckTimes.google
-    ? lastCheckTimes.google
+  const wmKey = `google:${cred.id}`;
+  const since = lastCheckTimes[wmKey]
+    ? lastCheckTimes[wmKey]
     : new Date(Date.now() - 30 * 60 * 1000);
 
-  lastCheckTimes.google = new Date();
+  lastCheckTimes[wmKey] = new Date();
 
   const client = new ImapFlow({
     host: 'imap.gmail.com',
@@ -499,16 +505,23 @@ async function runReplyDetection() {
     console.log(`[OOO Resumer] Resumed ${resumed} OOO-paused enrollments`);
   }
 
-  // Detect new replies
-  const [microsoftCred, googleCred] = await Promise.all([
-    prisma.integrationCredential.findFirst({ where: { provider: 'microsoft' } }),
-    prisma.integrationCredential.findFirst({ where: { provider: 'google' } }),
+  // Detect new replies — scan EVERY connected mailbox, not just the first.
+  // Previously this used findFirst({provider}), so reply/OOO detection only ever
+  // ran against the oldest Microsoft credential; if that user wasn't assigned to
+  // the Entra app (AADSTS50105) it failed every tick and no other user was ever
+  // scanned. detectRepliesViaGraph / detectRepliesViaIMAP each isolate their own
+  // per-credential errors, so one bad mailbox no longer blocks the rest.
+  const [microsoftCreds, googleCreds] = await Promise.all([
+    prisma.integrationCredential.findMany({ where: { provider: 'microsoft', NOT: { refreshToken: null } } }),
+    prisma.integrationCredential.findMany({ where: { provider: 'google' } }),
   ]);
 
-  if (microsoftCred?.refreshToken) {
-    await detectRepliesViaGraph(microsoftCred);
-  } else if (googleCred?.clientId && googleCred?.clientSecret) {
-    await detectRepliesViaIMAP(googleCred);
+  for (const cred of microsoftCreds) {
+    await detectRepliesViaGraph(cred);
+  }
+  // Gmail IMAP fallback for any user without a Microsoft connection.
+  for (const cred of googleCreds) {
+    if (cred.clientId && cred.clientSecret) await detectRepliesViaIMAP(cred);
   }
   // If neither integration is configured, silently skip
 }
