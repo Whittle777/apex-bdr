@@ -204,8 +204,43 @@ describe('send pacing — cap clamping + effective cap', () => {
   });
 });
 
+describe('send pacing — rolling weekly cap', () => {
+  const inWindow = new Date('2026-06-10T16:00:00Z'); // 9am PDT, in window
+
+  test('weekly-cap-reached when sentThisWeekCount >= weeklyCap, before daily cap', () => {
+    const d = pickNextDecision(baseArgs({
+      now: inWindow, sentTodayCount: 0, dailyCap: 150,
+      sentThisWeekCount: 5000, weeklyCap: 5000,
+    }));
+    expect(d.action).toBe('weekly-cap-reached');
+  });
+
+  test('weekly cap takes precedence over an available daily allowance', () => {
+    // Daily allows (0/150) but the week is full → still blocked.
+    const d = pickNextDecision(baseArgs({
+      now: inWindow, sentTodayCount: 0, dailyCap: 150,
+      sentThisWeekCount: 5001, weeklyCap: 5000,
+    }));
+    expect(d.action).toBe('weekly-cap-reached');
+  });
+
+  test('under the weekly cap → still sends (daily cap governs)', () => {
+    const d = pickNextDecision(baseArgs({
+      now: inWindow, sentTodayCount: 0, dailyCap: 150,
+      sentThisWeekCount: 4999, weeklyCap: 5000,
+    }));
+    expect(d.action).toBe('send');
+  });
+
+  test('absent weekly args (old callers) → no weekly limit applied', () => {
+    const d = pickNextDecision(baseArgs({ now: inWindow, sentThisWeekCount: 99999 }));
+    // weeklyCap defaults to Infinity, so a huge weekly count is irrelevant.
+    expect(d.action).toBe('send');
+  });
+});
+
 describe('send pacing — getConfig env wiring', () => {
-  const ENV_KEYS = ['DAILY_SEND_CAP', 'SEND_DEFAULT_DAILY_CAP', 'SEND_HARD_CAP_CEILING'];
+  const ENV_KEYS = ['DAILY_SEND_CAP', 'SEND_DEFAULT_DAILY_CAP', 'SEND_HARD_CAP_CEILING', 'WEEKLY_SEND_CAP', 'SEND_WEEKLY_HARD_CEILING'];
   let saved;
   beforeEach(() => {
     saved = {};
@@ -246,5 +281,18 @@ describe('send pacing — getConfig env wiring', () => {
     const cfg = getConfig();
     expect(cfg.hardCapCeiling).toBe(400);
     expect(cfg.defaultDailyCap).toBe(380);
+  });
+
+  test('weekly cap defaults to 5000, clamped to its own ceiling', () => {
+    const cfg = getConfig();
+    expect(cfg.weeklyCap).toBe(5000);
+    expect(cfg.weeklyHardCeiling).toBe(10000);
+  });
+
+  test('WEEKLY_SEND_CAP is honored; a typo is clamped to the weekly ceiling', () => {
+    process.env.WEEKLY_SEND_CAP = '3000';
+    expect(getConfig().weeklyCap).toBe(3000);
+    process.env.WEEKLY_SEND_CAP = '999999';
+    expect(getConfig().weeklyCap).toBe(10000); // clamped
   });
 });
