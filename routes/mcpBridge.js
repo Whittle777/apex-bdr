@@ -187,12 +187,15 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
 });
 
 // POST /api/mcp/reply-email — immediate threaded reply.
-// Body: { inReplyToMessageId, body, from?, cc?, bcc?, replyAll?, includeOriginalBody? }
+// Body: { inReplyToMessageId, body, to?, from?, cc?, bcc?, replyAll?, includeOriginalBody? }
+// `to` = the recipient the reply must go to (the prospect). It OVERRIDES Graph's
+// reply-to-sender default; omit only to fall back to the parent's To line minus self.
 router.post('/reply-email', requireBridgeAuth, async (req, res) => {
-  const { inReplyToMessageId, body, from, cc, bcc, replyAll = false, includeOriginalBody = true } = req.body || {};
+  const { inReplyToMessageId, body, to, from, cc, bcc, replyAll = false, includeOriginalBody = true } = req.body || {};
 
   if (!ok(inReplyToMessageId)) return res.status(400).json({ ok: false, error: '"inReplyToMessageId" is required' });
   if (!ok(body)) return res.status(400).json({ ok: false, error: '"body" is required' });
+  if (to && !isEmail(to)) return res.status(400).json({ ok: false, error: '"to" must be a valid email' });
   if (cc && !isEmail(cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
   if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
@@ -215,19 +218,30 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
   try {
     const r = await sendReplyViaGraph({
       accessToken: token.accessToken,
+      to,
       inReplyToMessageId,
       body,
       cc,
       bcc,
       replyAll: !!replyAll,
       includeOriginalBody: includeOriginalBody !== false,
+      selfEmail: cred.email,
     });
-    console.log(`[mcpBridge] ${replyAll ? 'replyAll' : 'reply'} ${cred.email} → ${r.graphMessageId} in ${r.elapsedMs}ms — newMessageId ${r.captured ? 'captured' : 'NOT captured'}`);
+    // Sent to ourselves instead of the prospect — report loudly, do not claim success.
+    if (r.misdirected) {
+      return res.status(502).json({
+        ok: false,
+        error: `Reply was delivered to the sending mailbox (${cred.email}), not "${r.to}". Microsoft Graph did not honor the recipient override. No further replies should be sent until this is resolved.`,
+        misdirected: true,
+      });
+    }
+    console.log(`[mcpBridge] reply ${cred.email} → ${r.to} (thread ${r.graphMessageId}) in ${r.elapsedMs}ms — newMessageId ${r.captured ? 'captured' : 'NOT captured'}`);
     return res.json({
       ok: true,
       status: 'sent',
       threaded: true,
       from: cred.email,
+      to: r.to,
       inReplyToMessageId: r.graphMessageId,
       replyAll: !!replyAll,
       includedOriginalBody: r.includedOriginalBody,
