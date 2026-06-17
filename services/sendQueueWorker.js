@@ -158,12 +158,14 @@ async function drainQueue({ now = new Date() } = {}) {
       const result = item.inReplyToMessageId
         ? await sendReplyViaGraph({
             accessToken: token.accessToken,
+            to: item.to, // the prospect — reply must go here, NOT the parent's sender
             inReplyToMessageId: item.inReplyToMessageId,
             body: item.body,
             cc: item.cc,
             bcc: item.bcc,
             replyAll: item.replyAll,
             includeOriginalBody: item.includeOriginalBody,
+            selfEmail: token.fromEmail, // loop-guard: never deliver a reply back to ourselves
           })
         : await sendEmailViaGraph({
             accessToken: token.accessToken,
@@ -173,6 +175,17 @@ async function drainQueue({ now = new Date() } = {}) {
             cc: item.cc,
             bcc: item.bcc,
           });
+
+      // A reply that landed back at the sending mailbox is a TERMINAL failure —
+      // do not record it as sent and do not retry (retry would just re-misfire).
+      if (result.misdirected) {
+        await prisma.outboundQueue.update({
+          where: { id: item.id },
+          data: { status: 'failed', failureReason: 'reply misdirected to sending mailbox (Graph ignored recipient override) — halted, not retried' },
+        }).catch(() => {});
+        console.error(`[sendQueueWorker] queue#${item.id} (user ${userId}) REPLY MISDIRECTED to self — marked failed, NOT retried. Investigate before resuming replies.`);
+        continue;
+      }
 
       await prisma.outboundQueue.update({
         where: { id: item.id },
@@ -196,8 +209,10 @@ async function drainQueue({ now = new Date() } = {}) {
       sent += 1;
       console.log(`[sendQueueWorker] sent queue#${item.id} (user ${userId}) → ${item.to || item.inReplyToMessageId} — messageId ${result.captured ? 'captured' : 'NOT captured'}`);
     } catch (err) {
-      // Failed: requeue for retry up to 3 attempts, else mark failed.
-      const failStatus = item.attempts + 1 >= 3 ? 'failed' : 'queued';
+      // The loop-guard (no external recipient) is a permanent config problem —
+      // retrying can't fix it, so fail terminally instead of churning 3 attempts.
+      const terminal = err.code === 'reply_loop_guard';
+      const failStatus = terminal || item.attempts + 1 >= 3 ? 'failed' : 'queued';
       await prisma.outboundQueue.update({
         where: { id: item.id },
         data: { status: failStatus, failureReason: err.message },

@@ -134,14 +134,32 @@ async function resolveGraphMessageId(accessToken, inReplyTo) {
   }
 }
 
+const normAddr = (s) => (typeof s === 'string' ? s.trim().toLowerCase() : '');
+const addressesOf = (recipients) =>
+  (recipients || []).map((r) => normAddr(r?.emailAddress?.address)).filter(Boolean);
+
 /**
- * Send a true RFC 5322 threaded reply via /me/messages/{id}/reply(All),
- * optionally quoting the original, then poll Sent Items for the new ids.
- * Throws GraphError (with httpStatus) on resolve-miss / send failure.
+ * Send a threaded reply via /me/messages/{id}/reply, addressed to the CALLER'S
+ * explicit recipient (the prospect) — NOT the parent message's sender.
+ *
+ * Why this matters (2026-06-17 production bug): Graph's reply action
+ * auto-populates recipients from the original message. When the parent is one
+ * the mailbox SENT (e.g. sequence step 1, sent by us to the prospect), that
+ * "original recipient" logic resolves to the mailbox owner, so every reply
+ * (step 2/4) looped back to us instead of the prospect. The fix: pass an
+ * explicit `toRecipients` in the reply `message` body to OVERRIDE the
+ * auto-fill. We stay on /reply (not createReply+patch+send) because the IT-
+ * approved scope is Mail.Send + Mail.Read only — no Mail.ReadWrite for drafts.
+ *
+ * Guards: refuse to send if the resolved recipient is empty or is the sending
+ * mailbox (loud loop-guard, pre-send), and verify the actually-sent recipient
+ * post-send so a misfire can never again be silent.
+ *
+ * Throws GraphError (with httpStatus) on resolve-miss / loop-guard / send failure.
  */
 async function sendReplyViaGraph({
-  accessToken, inReplyToMessageId, body, cc, bcc,
-  replyAll = false, includeOriginalBody = true, debug = GRAPH_DEBUG,
+  accessToken, to, inReplyToMessageId, body, cc, bcc,
+  replyAll = false, includeOriginalBody = true, selfEmail, debug = GRAPH_DEBUG,
 }) {
   const startedAt = Date.now();
 
@@ -158,20 +176,58 @@ async function sendReplyViaGraph({
     );
   }
 
-  // Optionally fetch the original to manually quote it (Graph's /reply with
-  // a message.body override does not auto-append the original).
+  // Fetch the parent: needed for the quoted original, the "Re:" subject,
+  // conversationId, and (for the no-explicit-`to` fallback / replyAll) its
+  // recipient list. Always read it — recipient resolution depends on it.
+  let original = {};
+  try {
+    const orig = await axios.get(
+      `${GRAPH}/me/messages/${encodeURIComponent(graphMessageId)}?$select=subject,from,toRecipients,ccRecipients,sentDateTime,conversationId,internetMessageId,body`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
+    );
+    original = orig.data || {};
+  } catch (err) {
+    throw new GraphError(`Failed to read the parent message for the reply: ${err.message}`, { httpStatus: 502 });
+  }
+  const originalSubject = original.subject || null;
+  const originalConversationId = original.conversationId || null;
+
+  // ── Resolve the recipient — the crux of the fix ────────────────────────────
+  // NEVER derive the recipient from the parent's SENDER. Use the caller's
+  // explicit `to`; only if absent, fall back to the parent's To line minus the
+  // mailbox owner (never the sender).
+  const selfSet = new Set([normAddr(selfEmail), normAddr(original.from?.emailAddress?.address)].filter(Boolean));
+  const explicitTo = normAddr(to);
+  let toAddrs = explicitTo
+    ? [explicitTo]
+    : addressesOf(original.toRecipients).filter((a) => !selfSet.has(a));
+  toAddrs = [...new Set(toAddrs)].filter(Boolean);
+
+  // Loud loop-guard: a reply with no external recipient — or one addressed only
+  // to the sending mailbox — must NOT send. (This is the 2026-06-17 failure mode.)
+  if (toAddrs.length === 0 || toAddrs.every((a) => selfSet.has(a))) {
+    throw new GraphError(
+      'Reply would loop back to the sending mailbox (no external recipient resolved). Pass an explicit prospect "to".',
+      { httpStatus: 422, code: 'reply_loop_guard' }
+    );
+  }
+
+  // cc: caller cc + (replyAll → parent To/Cc minus self minus our recipients).
+  const ccSet = new Set(cc ? [normAddr(cc)] : []);
+  if (replyAll) {
+    for (const a of [...addressesOf(original.toRecipients), ...addressesOf(original.ccRecipients)]) {
+      if (a && !selfSet.has(a) && !toAddrs.includes(a)) ccSet.add(a);
+    }
+  }
+  const ccAddrs = [...ccSet].filter((a) => !toAddrs.includes(a));
+  const bccAddrs = bcc ? [normAddr(bcc)] : [];
+
+  // Manually quote the original (Graph's /reply with a body override does not
+  // auto-append it).
   let originalQuoteHtml = '';
-  let originalSubject = null;
-  let originalConversationId = null;
   if (includeOriginalBody) {
     try {
-      const orig = await axios.get(
-        `${GRAPH}/me/messages/${encodeURIComponent(graphMessageId)}?$select=subject,from,sentDateTime,conversationId,body`,
-        { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 10000 }
-      );
-      const m = orig.data || {};
-      originalSubject = m.subject;
-      originalConversationId = m.conversationId;
+      const m = original;
       const senderName = m.from?.emailAddress?.name || m.from?.emailAddress?.address || 'sender';
       const senderEmail = m.from?.emailAddress?.address || '';
       const sentAt = m.sentDateTime ? new Date(m.sentDateTime).toLocaleString() : '';
@@ -183,34 +239,39 @@ async function sendReplyViaGraph({
         `<div style="font-size: 0.85em; margin-bottom: 6px;">On ${sentAt}, ${senderName}${senderEmail ? ` &lt;${senderEmail}&gt;` : ''} wrote:</div>` +
         origBodyHtml + `</div>`;
     } catch (err) {
-      console.warn(`[bridgeMailer] couldn't fetch original for quoting: ${err.message}`);
+      console.warn(`[bridgeMailer] couldn't build quoted original: ${err.message}`);
     }
   }
 
   const finalBodyHtml = buildHtmlBody(body) + originalQuoteHtml;
+  // The explicit toRecipients OVERRIDES Graph's sender-derived auto-fill. This
+  // is the line that fixes the misdirected-reply bug.
   const message = {
+    toRecipients: toAddrs.map((a) => ({ emailAddress: { address: a } })),
+    ...(ccAddrs.length ? { ccRecipients: ccAddrs.map((a) => ({ emailAddress: { address: a } })) } : {}),
+    ...(bccAddrs.length ? { bccRecipients: bccAddrs.map((a) => ({ emailAddress: { address: a } })) } : {}),
     body: { contentType: 'HTML', content: finalBodyHtml },
-    ...(cc ? { ccRecipients: [{ emailAddress: { address: cc } }] } : {}),
-    ...(bcc ? { bccRecipients: [{ emailAddress: { address: bcc } }] } : {}),
   };
-  const endpoint = `${GRAPH}/me/messages/${encodeURIComponent(graphMessageId)}/${replyAll ? 'replyAll' : 'reply'}`;
+  // Always /reply (single) — we set recipients explicitly, so /replyAll's
+  // auto-expansion (which could re-introduce self) is neither needed nor wanted.
+  const endpoint = `${GRAPH}/me/messages/${encodeURIComponent(graphMessageId)}/reply`;
   const sinceIso = new Date(Date.now() - 60 * 1000).toISOString();
 
   try {
     const resp = await axios.post(endpoint, { message }, {
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, timeout: 15000,
     });
-    dumpGraph(`POST ${replyAll ? 'replyAll' : 'reply'}`, resp.status, resp.headers, resp.data);
+    dumpGraph('POST reply', resp.status, resp.headers, resp.data);
   } catch (err) {
     const status = err.response?.status;
     const graphErr = err.response?.data?.error;
     const detail = graphErr?.message || graphErr?.code || err.message;
-    dumpGraph(`POST ${replyAll ? 'replyAll' : 'reply'} (error)`, status, err.response?.headers, err.response?.data);
+    dumpGraph('POST reply (error)', status, err.response?.headers, err.response?.data);
     throw new GraphError(`Microsoft Graph rejected the reply (status ${status || '?'}): ${detail}`, { httpStatus: 502 });
   }
 
-  // Reply subject is "Re: <original>"; for replyAll the To line is unknown,
-  // so match on subject only and take the most recent.
+  // Poll Sent Items by subject; the most-recent same-subject reply is ours.
+  // We also read its toRecipients to VERIFY it went to the prospect, not us.
   let found = null;
   let lookupError = null;
   const replySubject = originalSubject
@@ -227,13 +288,24 @@ async function sendReplyViaGraph({
     }
   }
 
+  // Post-send verification: if the message we just sent landed at the mailbox
+  // owner (Graph ignored the override), surface it LOUDLY instead of silently
+  // reporting success — callers treat misdirected as a terminal failure.
+  const sentToAddrs = found ? addressesOf(found.toRecipients) : [];
+  const misdirected = sentToAddrs.length > 0 && sentToAddrs.every((a) => selfSet.has(a));
+  if (misdirected) {
+    console.error(`[bridgeMailer] REPLY MISDIRECTED — sent to ${sentToAddrs.join(', ')} (the sending mailbox), not the intended ${toAddrs.join(', ')}. Graph did not honor the recipient override.`);
+  }
+
   return {
     graphMessageId,
     messageId: found?.id || null,
     internetMessageId: found?.internetMessageId || null,
-    // conversationId is reliable even on a poll miss — the reply inherits
-    // the original's conversation, which we fetched above.
+    // conversationId is reliable even on a poll miss — the reply inherits the
+    // original's conversation, which we fetched above.
     conversationId: found?.conversationId || originalConversationId || null,
+    to: toAddrs[0],
+    misdirected,
     includedOriginalBody: !!includeOriginalBody && !!originalQuoteHtml,
     captured: !!found?.id,
     lookupError,

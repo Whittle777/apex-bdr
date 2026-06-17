@@ -143,10 +143,11 @@ export async function runSendEmail({ to, subject, body, cc, bcc, from }) {
  * References are set correctly and the new message inherits the original
  * conversationId.
  */
-export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc, replyAll, includeOriginalBody }) {
+export async function runReplyToEmail({ inReplyToMessageId, body, to, from, cc, bcc, replyAll, includeOriginalBody }) {
   const errors = [];
   if (!ok(inReplyToMessageId)) errors.push('"inReplyToMessageId" is required (the messageId returned by send_email, or the original\'s internetMessageId)');
   if (!ok(body))               errors.push('"body" is required and must be non-empty');
+  if (to   && !isEmail(to))    errors.push('"to" must be a valid email address if provided');
   if (cc   && !isEmail(cc))    errors.push('"cc" must be a valid email address if provided');
   if (bcc  && !isEmail(bcc))   errors.push('"bcc" must be a valid email address if provided');
   if (from && !isEmail(from))  errors.push('"from" must be a valid email address if provided');
@@ -154,10 +155,11 @@ export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc,
     return { isError: true, text: `❌ Input validation failed:\n - ${errors.join('\n - ')}` };
   }
 
-  log(`reply_to_email: → inReplyTo=${inReplyToMessageId.slice(0, 40)}…, replyAll=${!!replyAll}, includeOriginal=${includeOriginalBody !== false}`);
+  log(`reply_to_email: → to=${to || '(fallback)'}, inReplyTo=${inReplyToMessageId.slice(0, 40)}…, replyAll=${!!replyAll}, includeOriginal=${includeOriginalBody !== false}`);
   const result = await callBridge('/api/mcp/reply-email', {
     inReplyToMessageId,
     body,
+    to,
     from,
     cc,
     bcc,
@@ -168,6 +170,7 @@ export async function runReplyToEmail({ inReplyToMessageId, body, from, cc, bcc,
     const lines = [
       `✅ Threaded reply sent${result.replyAll ? ' (replyAll)' : ''}.`,
       `   from:           ${result.from}`,
+      ...(result.to ? [`   to:             ${result.to}`] : []),
       `   inReplyTo:      ${result.inReplyToMessageId}`,
       ...(result.cc  ? [`   cc:             ${result.cc}`]  : []),
       ...(result.bcc ? [`   bcc:            ${result.bcc}`] : []),
@@ -527,10 +530,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'reply_to_email',
       description: [
         'Send a true RFC 5322 threaded reply to an existing email through the',
-        'apex-bdr app. The reply lands in the same Outlook conversation as the',
-        'original — In-Reply-To and References headers are set automatically by',
-        "Microsoft Graph, and conversationId is preserved. Recipient mail clients",
-        '(Outlook, Gmail, Apple Mail) thread it under the original.',
+        'apex-bdr app. The reply threads under the original (In-Reply-To /',
+        'References / conversationId) so recipient clients (Outlook, Gmail, Apple',
+        'Mail) group it with the original.',
+        '',
+        'CRITICAL — set "to" to the person who should RECEIVE the reply (the',
+        'prospect). For a sequence follow-up, the parent is the message YOU sent to',
+        'the prospect; you are replying so the PROSPECT gets it. Always pass',
+        '`to=<prospect email>`. (Without it, the reply falls back to the parent\'s',
+        "To line; it is never sent back to the parent's sender.)",
         '',
         'Use this for sequence steps 2-N when you want the follow-up to chain',
         "under the first send. The original message must have been sent or",
@@ -551,6 +559,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             type: 'string',
             description: 'The reply body. Plain text OR HTML. Bare URLs and markdown [label](url) become clickable. Do NOT include a quoted-original block manually — when includeOriginalBody is true (default) the bridge fetches the original and appends it for you.',
           },
+          to: {
+            type: 'string',
+            description: 'STRONGLY RECOMMENDED. The recipient of the reply — the prospect (the person to follow up with). This overrides Microsoft Graph\'s default of replying to the parent message\'s sender, which for a message you sent would loop the reply back to your own mailbox. Omit only if you deliberately want the parent\'s To line.',
+          },
           from: {
             type: 'string',
             description: 'Optional. Pick a specific connected Microsoft account. Defaults to the first connected account. Ignored when authed via a per-user token (in that mode the token IS the identity).',
@@ -559,7 +571,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           bcc:      { type: 'string', description: 'Optional BCC address.' },
           replyAll: {
             type: 'boolean',
-            description: 'If true, replies to all recipients of the original (To + CC). If false (default), replies only to the original sender.',
+            description: 'If true, also CCs the original\'s other recipients (To + CC, minus your own mailbox). The primary recipient is always `to`. Default false.',
           },
           includeOriginalBody: {
             type: 'boolean',
