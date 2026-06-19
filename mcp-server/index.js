@@ -200,7 +200,7 @@ export async function runReplyToEmail({ inReplyToMessageId, body, to, from, cc, 
 export async function runEnqueueEmail({
   to, subject, body, cc, bcc, from,
   inReplyToMessageId, replyAll, includeOriginalBody,
-  batchId, scheduledFor, dailyCap, gate,
+  batchId, scheduledFor, dailyCap, gate, clientRef, meta,
 }) {
   const isReply = ok(inReplyToMessageId);
   const errors = [];
@@ -223,7 +223,7 @@ export async function runEnqueueEmail({
   const result = await callBridge('/api/mcp/enqueue-email', {
     to, subject, body, cc, bcc, from,
     inReplyToMessageId, replyAll: !!replyAll, includeOriginalBody: includeOriginalBody !== false,
-    batchId, scheduledFor, dailyCap, gate,
+    batchId, scheduledFor, dailyCap, gate, clientRef, meta,
   });
   if (result.ok) {
     const lines = [
@@ -340,16 +340,19 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
     const r = await callBridge(`/api/mcp/queue/${encodeURIComponent(trackingId)}`, null, 'GET');
     if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
     const it = r.item || {};
+    const inet = it.internetMessageId != null ? it.internetMessageId : (it.status === 'sent' ? 'null (not captured)' : null);
     return {
       isError: false,
       text: [
         `Queue item ${trackingId}:`,
-        `   status:     ${it.status}`,
-        ...(it.to ? [`   to:         ${it.to}`] : []),
-        ...(it.messageId ? [`   messageId:  ${it.messageId}`] : []),
-        ...(it.internetMessageId ? [`   inetMsgId:  ${it.internetMessageId}`] : []),
-        ...(it.conversationId ? [`   convoId:    ${it.conversationId}`] : []),
-        ...(it.failureReason ? [`   note:       ${it.failureReason}`] : []),
+        `   status:       ${it.status}`,
+        ...(it.to ? [`   to:           ${it.to}`] : []),
+        ...(it.clientRef ? [`   clientRef:    ${it.clientRef}`] : []),
+        ...(inet != null ? [`   internetMsgId:${inet}   ← RFC 5322 dedupe key`] : []),
+        ...(it.graphItemId ? [`   graphItemId:  ${it.graphItemId}   ← EWS item-id (internal)`] : []),
+        ...(it.conversationId ? [`   convoId:      ${it.conversationId}`] : []),
+        ...(it.meta != null ? [`   meta:         ${JSON.stringify(it.meta)}`] : []),
+        ...(it.failureReason ? [`   note:         ${it.failureReason}`] : []),
       ].join('\n'),
     };
   }
@@ -376,8 +379,15 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
     `Queue${scope}: ${r.total} item(s) — ${counts}`,
     ...(policyLine ? [policyLine] : []),
     ...r.items.slice(0, 50).map((it) => {
-      const id = it.messageId ? ` msgId=${it.messageId.slice(0, 24)}…` : '';
-      return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${id}`;
+      const ref = it.clientRef ? ` ref=${it.clientRef}` : '';
+      // internetMessageId is the dedupe key — shown distinctly, never collapsed
+      // into the EWS item-id; explicit "null" for a sent item that lacks one.
+      const inet = it.internetMessageId
+        ? ` inet=${it.internetMessageId}`
+        : (it.status === 'sent' ? ' inet=null' : '');
+      const graph = it.graphItemId ? ` graph=${it.graphItemId.slice(0, 18)}…` : '';
+      const metaStr = it.meta != null ? ` meta=${JSON.stringify(it.meta)}` : '';
+      return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${ref}${inet}${graph}${metaStr}`;
     }),
     ...(r.items.length > 50 ? [`   …and ${r.items.length - 50} more`] : []),
   ];
@@ -615,6 +625,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           scheduledFor: { type: 'string', description: 'Optional ISO timestamp — earliest time this may send (still subject to pacing/window/cap).' },
           dailyCap: { type: 'integer', description: 'Max messages to send today for this inbox (from Send Health Daily Cap). Sets the day\'s policy.' },
           gate: { type: 'string', enum: ['proceed', 'warning', 'abort'], description: 'Day gate from Send Health Status. abort=halt the day (CRITICAL); warning/proceed=send (cap encodes WARNING).' },
+          clientRef: { type: 'string', description: 'Your key (e.g. Prospect ID "P0214"). Persisted and returned on every check_email_queue status read so you can join the sent email back to your row.' },
+          meta: { type: 'object', description: 'Opaque metadata stored and returned verbatim (e.g. {"step":2,"lane":1,"rep":"Sai Konda"}). The connector never inspects it — use it to carry sequence step / lane / variant.' },
         },
         required: ['body'],
       },
@@ -665,7 +677,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                 replyAll: { type: 'boolean', description: 'Reply to all (reply items only).' },
                 includeOriginalBody: { type: 'boolean', description: 'Quote the original (reply items only). Default true.' },
                 scheduledFor: { type: 'string', description: 'Per-item ISO override of defaultScheduledFor.' },
-                clientRef: { type: 'string', description: 'Your key (e.g. Prospect ID "P0214"), echoed back in the result so you can map results to rows without re-matching on email.' },
+                clientRef: { type: 'string', description: 'Your key (e.g. Prospect ID "P0214"). Echoed in the result AND persisted on the row, so check_email_queue returns it on the sent record (days later) for a (clientRef, internetMessageId) join — no fuzzy recipient/subject matching.' },
+                meta: { type: 'object', description: 'Opaque metadata stored and returned verbatim on the sent record (e.g. {"step":2,"lane":1}). The connector never inspects it — carries sequence step / lane / variant / any future dimension.' },
               },
               required: ['body'],
             },
@@ -685,10 +698,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: 'check_email_queue',
       description: [
         'Check the paced send queue. Pass batchId to see a whole batch, or',
-        'trackingId for one item. Returns each item\'s status (queued/sending/sent/',
-        'failed/cancelled) and, once sent, its messageId / internetMessageId /',
-        'conversationId so you can reconcile (e.g. write the Email Log / Send',
-        'Health) and thread follow-ups.',
+        'trackingId for one item. Each item reports its status (queued/sending/',
+        'sent/failed/cancelled) plus, for reconciliation:',
+        '- internetMessageId — the RFC 5322 <…@…> Message-ID, the STABLE dedupe key',
+        '  (what recipient headers and Re: replies reference). Use THIS to dedupe,',
+        '  not graphItemId. Shown as null if it could not be captured.',
+        '- graphItemId — the EWS/Graph item-id (internal handle); distinct from the',
+        '  internetMessageId, never a substitute for it.',
+        '- clientRef — your key (e.g. P0214), echoed on every read so you can join',
+        '  on (clientRef, internetMessageId) with no fuzzy matching.',
+        '- meta — the opaque blob you sent (e.g. {"step":2,"lane":1}), verbatim.',
+        '- conversationId — for threading follow-ups.',
         '',
         "When listing (not a single trackingId), the response also reports the day's",
         'send policy — cap, sentToday, remainingToday, gate, window open/closed — so',

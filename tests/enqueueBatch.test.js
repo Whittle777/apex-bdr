@@ -9,6 +9,7 @@ const {
   countDecisions,
   dedupeKey,
   getBlockedDomains,
+  domainIsBlocked,
 } = require('../services/enqueueBatch');
 
 const blocked = new Set(['appliedmaterials.com']);
@@ -26,9 +27,9 @@ describe('validateItem', () => {
     expect(validateItem({ to: 'not-an-email', subject: 's', body: 'b' }, { blockedDomains: blocked }))
       .toMatchObject({ valid: false, reason: 'invalid recipient' });
   });
-  test('rejects blocked domain', () => {
+  test('rejects blocked domain with reason BLOCKED_DOMAIN', () => {
     expect(validateItem({ to: 'guess@appliedmaterials.com', subject: 's', body: 'b' }, { blockedDomains: blocked }))
-      .toMatchObject({ valid: false, reason: 'blocked domain' });
+      .toMatchObject({ valid: false, reason: 'BLOCKED_DOMAIN' });
   });
   test('rejects invalid scheduledFor', () => {
     expect(validateItem({ to: 'a@x.com', subject: 's', body: 'b', scheduledFor: 'soon' }, { blockedDomains: blocked }))
@@ -118,10 +119,50 @@ describe('decideBatch — gate=abort', () => {
 });
 
 describe('getBlockedDomains', () => {
-  test('merges defaults with BLOCKED_SEND_DOMAINS env', () => {
-    const set = getBlockedDomains({ BLOCKED_SEND_DOMAINS: 'amd.com, @evil.test' });
-    expect(set.has('appliedmaterials.com')).toBe(true);
-    expect(set.has('amd.com')).toBe(true);
+  test('seeds the full held set (incl. alias pairs) and merges BLOCKED_SEND_DOMAINS env', () => {
+    const set = getBlockedDomains({ BLOCKED_SEND_DOMAINS: '@evil.test, NewHold.COM.' });
+    // seeded defaults
+    for (const d of ['amd.com', 'onsemi.com', 'wdc.com', 'westerndigital.com',
+      'appliedmaterials.com', 'amat.com', 'firstsolar.com']) {
+      expect(set.has(d)).toBe(true);
+    }
+    // env additions, normalized (leading @ and trailing dot stripped, lowercased)
     expect(set.has('evil.test')).toBe(true);
+    expect(set.has('newhold.com')).toBe(true);
+  });
+});
+
+describe('domainIsBlocked — alias + subdomain awareness', () => {
+  const held = getBlockedDomains({}); // full seeded set
+
+  test('blocks both members of an alias pair (amat.com == appliedmaterials.com)', () => {
+    expect(domainIsBlocked('amat.com', held)).toBe(true);
+    expect(domainIsBlocked('appliedmaterials.com', held)).toBe(true);
+    expect(domainIsBlocked('wdc.com', held)).toBe(true);
+    expect(domainIsBlocked('westerndigital.com', held)).toBe(true);
+  });
+
+  test('catches subdomains via the registrable domain (mail.amat.com → amat.com)', () => {
+    expect(domainIsBlocked('mail.amat.com', held)).toBe(true);
+    expect(domainIsBlocked('corp.eu.firstsolar.com', held)).toBe(true);
+  });
+
+  test('normalizes case and trailing dot', () => {
+    expect(domainIsBlocked('AMAT.COM.', held)).toBe(true);
+    expect(domainIsBlocked('Mail.Amat.Com', held)).toBe(true);
+  });
+
+  test('does not over-block: unrelated domains and the bare TLD pass', () => {
+    expect(domainIsBlocked('deckers.com', held)).toBe(false);
+    expect(domainIsBlocked('notamat.com', held)).toBe(false); // not a suffix match
+    expect(domainIsBlocked('com', held)).toBe(false);
+    expect(domainIsBlocked('', held)).toBe(false);
+  });
+
+  test('the exact probe leak set is now rejected at validation', () => {
+    for (const to of ['x@amat.com', 'y@appliedmaterials.com', 'z@mail.firstsolar.com', 'q@amd.com']) {
+      expect(validateItem({ to, subject: 's', body: 'b' }, { blockedDomains: held }))
+        .toMatchObject({ valid: false, reason: 'BLOCKED_DOMAIN' });
+    }
   });
 });
