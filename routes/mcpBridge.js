@@ -30,12 +30,36 @@ const { buildSelectorWhere, actionStatuses, targetStatus, partitionUpdate } = re
 const {
   MAX_BATCH_SIZE, REPLAY_WINDOW_MS, DEFAULT_DEDUPE_SCOPE,
   getBlockedDomains, dedupeStatesFor, rowDedupeKey,
-  validateItem, decideBatch, countDecisions,
+  validateItem, decideBatch, countDecisions, domainIsBlocked, domainOf,
 } = require('../services/enqueueBatch');
 
 // Loose RFC 5322-ish check — good enough to catch obvious typos.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ok = (s) => typeof s === 'string' && s.trim().length > 0;
+
+// Server-side held-domain guard for the IMMEDIATE paths (send-email / reply-email).
+// The paced paths run the same check inside validateItem; this covers the rest so
+// NO send path can reach Graph for a held domain. Returns a reason string or null.
+function blockedRecipientReason(address) {
+  return address && domainIsBlocked(domainOf(address), getBlockedDomains())
+    ? `BLOCKED_DOMAIN (${domainOf(address)} is on the server-side held-domain list)`
+    : null;
+}
+
+// Shape a stored OutboundQueue row for the API: expose the EWS/Graph item-id as
+// `graphItemId` distinct from the RFC `internetMessageId` (never collapse them),
+// and parse the opaque `meta` blob back to an object.
+function shapeQueueItem(it) {
+  let meta = null;
+  if (it.meta != null) { try { meta = JSON.parse(it.meta); } catch { meta = it.meta; } }
+  return {
+    ...it,
+    graphItemId: it.messageId ?? null,         // EWS/Graph item-id (internal handle)
+    internetMessageId: it.internetMessageId ?? null, // RFC 5322 dedupe key (null if not captured)
+    clientRef: it.clientRef ?? null,
+    meta,
+  };
+}
 const isEmail = (s) => ok(s) && EMAIL_RE.test(s.trim());
 
 const hashToken = (plain) => crypto.createHash('sha256').update(plain).digest('hex');
@@ -149,6 +173,12 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
   if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
 
+  const blocked = blockedRecipientReason(to);
+  if (blocked) {
+    console.warn(`[mcpBridge] send-email REJECTED held domain → ${to} (${blocked})`);
+    return res.status(422).json({ ok: false, status: 'rejected', reason: 'BLOCKED_DOMAIN', error: `Rejected: ${blocked}. Nothing was sent.` });
+  }
+
   let cred;
   try {
     cred = await resolveCred(req, from);
@@ -199,6 +229,12 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
   if (cc && !isEmail(cc)) return res.status(400).json({ ok: false, error: '"cc" must be a valid email' });
   if (bcc && !isEmail(bcc)) return res.status(400).json({ ok: false, error: '"bcc" must be a valid email' });
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
+
+  const replyBlocked = blockedRecipientReason(to);
+  if (replyBlocked) {
+    console.warn(`[mcpBridge] reply-email REJECTED held domain → ${to} (${replyBlocked})`);
+    return res.status(422).json({ ok: false, status: 'rejected', reason: 'BLOCKED_DOMAIN', error: `Rejected: ${replyBlocked}. Nothing was sent.` });
+  }
 
   let cred;
   try {
@@ -266,7 +302,7 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
   const {
     to, subject, body, cc, bcc, from,
     inReplyToMessageId, replyAll = false, includeOriginalBody = true,
-    batchId, scheduledFor, dailyCap, gate,
+    batchId, scheduledFor, dailyCap, gate, clientRef, meta,
   } = req.body || {};
 
   const isReply = ok(inReplyToMessageId);
@@ -275,7 +311,8 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
   // they accept (spec §8).
   const v = validateItem({ to, subject, body, cc, bcc, inReplyToMessageId, scheduledFor }, { blockedDomains: getBlockedDomains() });
   if (!v.valid) {
-    const code = v.reason === 'blocked domain' ? 422 : 400;
+    const code = v.reason === 'BLOCKED_DOMAIN' ? 422 : 400;
+    if (v.reason === 'BLOCKED_DOMAIN') console.warn(`[mcpBridge] enqueue-email REJECTED held domain → ${to}`);
     return res.status(code).json({ ok: false, status: 'rejected', reason: v.reason, error: `Rejected: ${v.reason}` });
   }
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
@@ -335,6 +372,8 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
         replyAll: !!replyAll,
         includeOriginalBody: includeOriginalBody !== false,
         batchId: batchId || null,
+        clientRef: clientRef != null ? String(clientRef) : null,
+        meta: meta != null ? JSON.stringify(meta) : null,
         scheduledFor: scheduledForDate,
       },
     });
@@ -354,6 +393,7 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
       to: to || null,
       isReply,
       batchId: batchId || null,
+      ...(clientRef != null ? { clientRef: String(clientRef) } : {}),
       queuePosition,
       estimatedSendAt: estimatedSendAt.toISOString(),
       note: 'Queued. The worker paces sends within the send window under the day\'s cap; gate=abort halts the day. Poll GET /api/mcp/queue?batchId=… for status + messageId.',
@@ -489,10 +529,19 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
           replyAll: !!item.replyAll,
           includeOriginalBody: item.includeOriginalBody !== false,
           batchId,
+          clientRef: item.clientRef != null ? String(item.clientRef) : null,
+          meta: item.meta != null ? JSON.stringify(item.meta) : null,
           scheduledFor: scheduledForDate || null,
         },
       });
       trackingByIndex[d.index] = trackingId;
+    }
+
+    // Log any held-domain rejections so the workbook can raise a Review Queue row
+    // (compliance must be loud, never a silent skip).
+    const blockedItems = decisions.filter((d) => d.reason === 'BLOCKED_DOMAIN');
+    if (blockedItems.length) {
+      console.warn(`[mcpBridge] enqueue_batch ${batchId}: REJECTED ${blockedItems.length} held-domain recipient(s): ${blockedItems.map((d) => d.to).join(', ')}`);
     }
 
     const result = assembleBatchResult(batchId, decisions, trackingByIndex);
@@ -521,12 +570,14 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
       orderBy: { createdAt: 'asc' },
       select: {
         trackingId: true, to: true, subject: true, status: true, batchId: true,
+        clientRef: true, meta: true,
         inReplyToMessageId: true, scheduledFor: true, sentAt: true,
         messageId: true, internetMessageId: true, conversationId: true,
         attempts: true, failureReason: true, createdAt: true,
       },
     });
-    const counts = items.reduce((acc, it) => ((acc[it.status] = (acc[it.status] || 0) + 1), acc), {});
+    const shaped = items.map(shapeQueueItem);
+    const counts = shaped.reduce((acc, it) => ((acc[it.status] = (acc[it.status] || 0) + 1), acc), {});
 
     // Surface the day's send policy so "stopped because cap" is never invisible
     // again. Resolve the policy user: per-user token → that user; shared token →
@@ -539,7 +590,7 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
       console.warn('[mcpBridge] send-policy lookup for queue failed:', err.message);
     }
 
-    return res.json({ ok: true, total: items.length, counts, policy, items });
+    return res.json({ ok: true, total: shaped.length, counts, policy, items: shaped });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
   }
@@ -685,7 +736,7 @@ router.get('/queue/:trackingId', requireBridgeAuth, async (req, res) => {
     if (!item || (req.mcpUser && item.userId !== req.mcpUser.id)) {
       return res.status(404).json({ ok: false, error: 'No queue item with that trackingId' });
     }
-    return res.json({ ok: true, item });
+    return res.json({ ok: true, item: shapeQueueItem(item) });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
   }

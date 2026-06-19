@@ -307,18 +307,26 @@ model OutboundQueue {
   replyAll            Boolean   @default(false)
   includeOriginalBody Boolean   @default(true)
   batchId             String? // groups a day's batch for reconciliation
+  // clientRef: the caller's own key (e.g. Prospect ID "P0214"). Persisted for the
+  // life of the row and returned on every status read so reconcile can join sent
+  // emails back to workbook rows on (clientRef, internetMessageId).
+  clientRef           String?
+  // meta: opaque caller-supplied JSON blob (e.g. {"step":2,"lane":1}). Stored and
+  // returned verbatim; the connector never inspects or validates it.
+  meta                String?
   status              String    @default("queued") // queued | paused | sending | sent | failed | cancelled
   attempts            Int       @default(0)
   scheduledFor        DateTime? // earliest-eligible time (default: now); future-dating allowed
   sentAt              DateTime?
-  messageId           String?
-  internetMessageId   String?
+  messageId           String? // EWS / Graph item-id (internal handle) — NOT the RFC Message-ID
+  internetMessageId   String? // RFC 5322 <…@…> Message-ID — the stable, dedupe-safe key
   conversationId      String?
   failureReason       String?
   createdAt           DateTime  @default(now())
 
   @@index([userId, status])
   @@index([batchId])
+  @@index([clientRef])
 }
 
 // Per-user, per-day send policy. Cap + gate are supplied by the Cowork

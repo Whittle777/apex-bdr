@@ -44,18 +44,51 @@ function dedupeStatesFor(scope) {
 }
 
 /**
- * Server-side blocked-domain list — the agent can't forget it because it's
- * enforced here, not in the prompt. Seeded with the known guessed-pattern
- * bounce trap; extend via BLOCKED_SEND_DOMAINS (comma-separated). Items to a
- * blocked domain are `rejected` with reason "blocked domain".
+ * Server-side blocked-domain list — the REAL compliance guarantee, enforced
+ * here (not in any agent prompt). Any send path that reaches enqueue is checked
+ * unconditionally, so a raw spool / one-off / future script can't leak to a held
+ * domain even if it never called an agent-side gate.
+ *
+ * Seeded from the current held set; aliases of the same company are listed
+ * individually (amat.com == appliedmaterials.com; wdc.com == westerndigital.com)
+ * so each is blocked. Extend at runtime via BLOCKED_SEND_DOMAINS (comma-
+ * separated, no redeploy/code edit) — keep this in sync with the agent-side
+ * HELD_DOMAINS from one source. Items to a blocked domain are `rejected` with
+ * reason "BLOCKED_DOMAIN".
  */
-const DEFAULT_BLOCKED_DOMAINS = ['appliedmaterials.com'];
+const DEFAULT_BLOCKED_DOMAINS = [
+  'amd.com',
+  'onsemi.com',
+  'wdc.com', 'westerndigital.com',          // alias pair
+  'appliedmaterials.com', 'amat.com',       // alias pair
+  'firstsolar.com',
+];
 function getBlockedDomains(env = process.env) {
   const extra = (env.BLOCKED_SEND_DOMAINS || '')
     .split(',')
-    .map((d) => d.trim().toLowerCase().replace(/^@/, ''))
+    .map((d) => normalizeDomain(d))
     .filter(Boolean);
-  return new Set([...DEFAULT_BLOCKED_DOMAINS, ...extra]);
+  return new Set([...DEFAULT_BLOCKED_DOMAINS.map(normalizeDomain), ...extra]);
+}
+
+/** Normalize a domain: strip a leading "@", lowercase, drop a trailing dot. */
+function normalizeDomain(d) {
+  return (typeof d === 'string' ? d : '').trim().toLowerCase().replace(/^@/, '').replace(/\.$/, '');
+}
+
+/**
+ * True if `domain` is blocked — matching the registrable domain so SUBDOMAINS
+ * are caught too (mail.amat.com → amat.com). Checks the full domain and each
+ * parent suffix (excluding the bare TLD) against the blocked set.
+ */
+function domainIsBlocked(domain, blockedSet) {
+  const d = normalizeDomain(domain);
+  if (!d || !(blockedSet instanceof Set) || blockedSet.size === 0) return false;
+  const labels = d.split('.');
+  for (let i = 0; i < labels.length - 1; i++) {
+    if (blockedSet.has(labels.slice(i).join('.'))) return true;
+  }
+  return false;
 }
 
 /**
@@ -100,8 +133,8 @@ function validateItem(item, { blockedDomains } = {}) {
   if (item.bcc != null && item.bcc !== '' && !isEmail(item.bcc)) return { valid: false, reason: 'invalid bcc' };
 
   const normTo = normalizeEmail(item.to);
-  if (normTo && blockedDomains && blockedDomains.has(domainOf(normTo))) {
-    return { valid: false, reason: 'blocked domain' };
+  if (normTo && domainIsBlocked(domainOf(normTo), blockedDomains)) {
+    return { valid: false, reason: 'BLOCKED_DOMAIN' };
   }
 
   let scheduledForMs = null;
@@ -190,6 +223,8 @@ module.exports = {
   isEmail,
   normalizeEmail,
   domainOf,
+  normalizeDomain,
+  domainIsBlocked,
   dedupeStatesFor,
   getBlockedDomains,
   dedupeKey,
