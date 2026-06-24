@@ -386,7 +386,7 @@ async function listSentMessages({ accessToken, sinceIso, maxPages = SENT_MAX_PAG
  * scans it for the failed prospect address inside NDRs. Returns { value, truncated }.
  */
 async function listInboxMessages({ accessToken, sinceIso, maxPages = INBOX_MAX_PAGES }) {
-  const select = 'from,subject,body,bodyPreview,receivedDateTime,internetMessageId,webLink';
+  const select = 'id,from,subject,body,bodyPreview,receivedDateTime,internetMessageId,webLink';
   const url =
     `${GRAPH}/me/mailFolders/inbox/messages` +
     `?$filter=${encodeURIComponent(`receivedDateTime ge ${sinceIso}`)}` +
@@ -406,18 +406,111 @@ async function listInboxMessages({ accessToken, sinceIso, maxPages = INBOX_MAX_P
  * or null. Exact when present — makes bounce resolution unambiguous instead of
  * fuzzy body-scanning. Conservative: only matches the canonical DSN markers.
  */
-function extractFailedRecipient(body) {
-  if (typeof body !== 'string' || !body) return null;
+function extractFailedRecipient(text) {
+  if (typeof text !== 'string' || !text) return null;
   const patterns = [
     /Final-Recipient:\s*rfc822;\s*([^\s<>;,]+@[^\s<>;,]+)/i,
     /Original-Recipient:\s*rfc822;\s*([^\s<>;,]+@[^\s<>;,]+)/i,
     /X-Failed-Recipients:\s*([^\s<>;,]+@[^\s<>;,]+)/i,
   ];
   for (const re of patterns) {
-    const m = body.match(re);
+    const m = text.match(re);
     if (m) return m[1].trim().toLowerCase();
   }
   return null;
+}
+
+/**
+ * Looser failed-recipient extraction for text we ALREADY know is an NDR (the
+ * decoded attachment / delivery report). Catches provider phrasings that lack
+ * the formal DSN headers — chiefly Google's "wasn't delivered to <addr>". NOT
+ * safe to run on arbitrary mail (would false-positive on ordinary prose), so it
+ * is only ever applied to confirmed-NDR attachment text.
+ */
+function extractFailedRecipientLoose(ndrText) {
+  if (typeof ndrText !== 'string' || !ndrText) return null;
+  const patterns = [
+    /(?:wasn't|was not|couldn't be|could not be|hasn't been) delivered to\s*\**\s*<?([^\s<>;,]+@[^\s<>;,]+)>?/i,
+    /message to\s+<?([^\s<>;,]+@[^\s<>;,]+)>?\s+(?:couldn't|could not|wasn't|was not)/i,
+    /^To:\s*.*?<?([^\s<>;,]+@[^\s<>;,]+)>?\s*$/im, // original recipient in the bounced rfc822 headers
+  ];
+  for (const re of patterns) {
+    const m = ndrText.match(re);
+    if (m) return m[1].trim().toLowerCase();
+  }
+  return null;
+}
+
+// Is this inbound message a bounce / non-delivery report? Used to gate the
+// (more expensive) attachment fetch to only the messages that need it.
+function looksLikeNdr({ sender, subject }) {
+  const s = (sender || '').toLowerCase();
+  const subj = (subject || '').toLowerCase();
+  return (
+    /mailer-daemon|postmaster|microsoftexchange329e71ec|mail delivery (subsystem|system)/.test(s) ||
+    /delivery status notification|undeliverable|delivery (has )?failed|returned mail|mail delivery failed|address not found/.test(subj)
+  );
+}
+
+/**
+ * Pull the decoded text out of an NDR's attachments — the DSN report
+ * (message/delivery-status, carrying Final-Recipient) and the bounced original
+ * (message/rfc822, carrying the original To:). Google relays these as
+ * fileAttachments (base64 contentBytes); Exchange may use an itemAttachment
+ * (embedded message, fetched via $expand). Best-effort: any failure returns ''.
+ */
+async function fetchNdrText({ accessToken, messageId }) {
+  const texts = [];
+  try {
+    const resp = await axios.get(
+      `${GRAPH}/me/messages/${encodeURIComponent(messageId)}/attachments`,
+      { headers: { Authorization: `Bearer ${accessToken}` }, timeout: 15000 }
+    );
+    for (const a of resp.data?.value || []) {
+      const type = (a['@odata.type'] || '').toLowerCase();
+      if (type.includes('fileattachment') && a.contentBytes) {
+        try { texts.push(Buffer.from(a.contentBytes, 'base64').toString('utf8')); } catch { /* skip */ }
+      } else if (type.includes('itemattachment')) {
+        try {
+          const ir = await axios.get(
+            `${GRAPH}/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(a.id)}?$expand=microsoft.graph.itemattachment/item`,
+            { headers: { Authorization: `Bearer ${accessToken}`, Prefer: 'outlook.body-content-type="text"' }, timeout: 15000 }
+          );
+          const item = ir.data?.item;
+          if (item) {
+            const tos = (item.toRecipients || []).map((r) => r?.emailAddress?.address).filter(Boolean).join(', ');
+            texts.push([item.subject, tos ? `To: ${tos}` : '', item.body?.content].filter(Boolean).join('\n'));
+          }
+        } catch { /* skip this attachment */ }
+      }
+    }
+  } catch (err) {
+    if (GRAPH_DEBUG) console.error(`[bridgeMailer] NDR attachment fetch failed for ${messageId}: ${err.message}`);
+  }
+  return texts.join('\n\n');
+}
+
+/**
+ * Resolve the failed-recipient address for an inbound message. Tries the body
+ * first (cheap — some NDRs inline the DSN); for messages that look like a bounce
+ * but whose body lacks it (e.g. Google NDRs, where the body is just the EXTERNAL
+ * banner and the real report is in attachments), fetches and parses the
+ * attachments. Returns { failedRecipient, ndrText } — ndrText is the decoded
+ * delivery report (empty unless attachments were read), so the caller can append
+ * it to the body for the workbook's body-scan path too.
+ */
+async function resolveFailedRecipient({ accessToken, message }) {
+  const sender = message.from?.emailAddress?.address || '';
+  const subject = message.subject || '';
+  const bodyText = message.body?.content || message.bodyPreview || '';
+
+  const fromBody = extractFailedRecipient(bodyText);
+  if (fromBody) return { failedRecipient: fromBody, ndrText: '' };
+  if (!message.id || !looksLikeNdr({ sender, subject })) return { failedRecipient: null, ndrText: '' };
+
+  const ndrText = await fetchNdrText({ accessToken, messageId: message.id });
+  const failedRecipient = extractFailedRecipient(ndrText) || extractFailedRecipientLoose(ndrText);
+  return { failedRecipient, ndrText };
 }
 
 module.exports = {
@@ -429,4 +522,5 @@ module.exports = {
   listSentMessages,
   listInboxMessages,
   extractFailedRecipient,
+  resolveFailedRecipient,
 };

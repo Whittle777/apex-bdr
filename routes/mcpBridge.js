@@ -25,7 +25,7 @@ const prisma = require('../services/database');
 const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
 const {
   sendEmailViaGraph, sendReplyViaGraph,
-  listSentMessages, listInboxMessages, extractFailedRecipient,
+  listSentMessages, listInboxMessages, resolveFailedRecipient,
 } = require('../services/bridgeMailer');
 const { localDateString, getConfig } = require('../services/sendPacing');
 const { getSendPolicyStatus } = require('../services/sendQueueWorker');
@@ -701,19 +701,26 @@ router.get('/list-inbox', requireBridgeAuth, async (req, res) => {
 
   try {
     const { value: messages, truncated } = await listInboxMessages({ accessToken: auth.accessToken, sinceIso });
-    const items = messages.map((m) => {
-      const body = m.body?.content || m.bodyPreview || '';
-      const failedRecipient = extractFailedRecipient(body);
+    const items = await Promise.all(messages.map(async (m) => {
+      const baseBody = m.body?.content || m.bodyPreview || '';
+      // For NDRs/bounces the failed address often lives in the message/delivery-status
+      // or message/rfc822 ATTACHMENT, not the body (e.g. Google NDRs, whose body is just
+      // the EXTERNAL banner). resolveFailedRecipient fetches+parses those for NDR senders.
+      const { failedRecipient, ndrText } = await resolveFailedRecipient({ accessToken: auth.accessToken, message: m });
+      // Append the recovered delivery report so the workbook's body-scan path resolves it too.
+      const body = ndrText
+        ? `${baseBody}\n\n--- delivery report (extracted from NDR attachments) ---\n${ndrText}`
+        : baseBody;
       return {
         sender: (m.from?.emailAddress?.address || '').trim().toLowerCase(),
         subject: m.subject || '',
-        body, // FULL plain-text body (Prefer: text content-type)
+        body, // FULL plain-text body (Prefer: text content-type) + extracted NDR report when applicable
         receivedDateTime: m.receivedDateTime || null,
         internetMessageId: m.internetMessageId || null,
         webLink: m.webLink || null,
         ...(failedRecipient ? { failedRecipient } : {}),
       };
-    });
+    }));
     if (truncated) console.warn(`[mcpBridge] list-inbox ${auth.cred.email} hours=${hours}: TRUNCATED — page ceiling hit, result is partial`);
     console.log(`[mcpBridge] list-inbox ${auth.cred.email} hours=${hours}: ${items.length} message(s)${truncated ? ' (TRUNCATED)' : ''}`);
     return res.json({ ok: true, truncated, items });
