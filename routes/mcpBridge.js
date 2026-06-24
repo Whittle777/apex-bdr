@@ -23,7 +23,10 @@ const router = express.Router();
 
 const prisma = require('../services/database');
 const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
-const { sendEmailViaGraph, sendReplyViaGraph } = require('../services/bridgeMailer');
+const {
+  sendEmailViaGraph, sendReplyViaGraph,
+  listSentMessages, listInboxMessages, extractFailedRecipient,
+} = require('../services/bridgeMailer');
 const { localDateString, getConfig } = require('../services/sendPacing');
 const { getSendPolicyStatus } = require('../services/sendQueueWorker');
 const { buildSelectorWhere, actionStatuses, targetStatus, partitionUpdate } = require('../services/queueOps');
@@ -607,6 +610,115 @@ router.get('/send-policy', requireBridgeAuth, async (req, res) => {
     return res.json({ ok: true, from: cred.email, ...policy });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Send-policy lookup failed: ${err.message}` });
+  }
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// Read-only Outlook endpoints — consumed by the headless workbook automation
+// (outlook_client.py) for the reconcile (Sent Items) and reply scan (Inbox).
+// Same Bearer auth; GET-only; never send or mutate. Scope: Mail.Read.
+// ──────────────────────────────────────────────────────────────────────
+
+// Resolve sending credential + Microsoft access token for a read endpoint, or
+// send the appropriate error response. Returns { cred, accessToken } on success
+// or null (response already sent) on failure.
+async function resolveReadAuth(req, res) {
+  let cred;
+  try {
+    cred = await resolveCred(req);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
+    return null;
+  }
+  if (!cred) {
+    res.status(412).json({ ok: false, error: credError(req) });
+    return null;
+  }
+  try {
+    const token = await getMicrosoftAccessToken(cred.userId);
+    return { cred, accessToken: token.accessToken };
+  } catch (err) {
+    res.status(502).json({ ok: false, error: `Microsoft token refresh failed: ${err.message}` });
+    return null;
+  }
+}
+
+// GET /api/mcp/list-sent?days=N — Henry's Sent Items for the last N calendar
+// days (default 4, cap 14). One object per message; only messages with a real
+// internet Message-ID and an EXTERNAL (non-self-domain) To recipient. Internal/
+// calendar noise (only @<self-domain> recipients) is dropped. → reconcile feed.
+router.get('/list-sent', requireBridgeAuth, async (req, res) => {
+  let days = parseInt(req.query.days, 10);
+  if (!Number.isFinite(days) || days < 1) days = 4;
+  if (days > 14) days = 14;
+
+  const auth = await resolveReadAuth(req, res);
+  if (!auth) return;
+  const selfDomain = domainOf(auth.cred.email);
+  const tz = getConfig().tz; // stamp sentDate in the mailbox's local time, not UTC
+  const sinceIso = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const { value: messages, truncated } = await listSentMessages({ accessToken: auth.accessToken, sinceIso });
+    const items = [];
+    for (const m of messages) {
+      if (!ok(m.internetMessageId)) continue; // REQUIRED — omit the item if unobtainable
+      const tos = (m.toRecipients || [])
+        .map((r) => (r?.emailAddress?.address || '').trim().toLowerCase())
+        .filter(Boolean);
+      // first EXTERNAL (non-self-domain) To recipient
+      const recipient = tos.find((a) => domainOf(a) && domainOf(a) !== selfDomain);
+      if (!recipient) continue; // only internal recipients → skip (internal/calendar noise)
+      items.push({
+        recipient,
+        internetMessageId: m.internetMessageId,
+        ...(m.conversationId ? { conversationId: m.conversationId } : {}),
+        subject: m.subject || '',
+        // YYYY-MM-DD in the mailbox's local tz (a late-PT send must not roll to the next UTC day)
+        sentDate: m.sentDateTime ? localDateString(new Date(m.sentDateTime), tz) : null,
+      });
+    }
+    if (truncated) console.warn(`[mcpBridge] list-sent ${auth.cred.email} days=${days}: TRUNCATED — page ceiling hit, result is partial`);
+    console.log(`[mcpBridge] list-sent ${auth.cred.email} days=${days}: ${items.length}/${messages.length} message(s) usable${truncated ? ' (TRUNCATED)' : ''}`);
+    return res.json({ ok: true, truncated, items });
+  } catch (err) {
+    return res.status(err.httpStatus || 502).json({ ok: false, error: err.message });
+  }
+});
+
+// GET /api/mcp/list-inbox?hours=N — Henry's Inbox for the last N hours (default
+// 26, cap 168). One object per message with the FULL plain-text body (not a
+// preview) so the NDR/bounce classifier can find the failed address; when the
+// canonical DSN headers are present we also surface failedRecipient. → reply scan.
+router.get('/list-inbox', requireBridgeAuth, async (req, res) => {
+  let hours = parseInt(req.query.hours, 10);
+  if (!Number.isFinite(hours) || hours < 1) hours = 26;
+  if (hours > 168) hours = 168;
+
+  const auth = await resolveReadAuth(req, res);
+  if (!auth) return;
+  const sinceIso = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+
+  try {
+    const { value: messages, truncated } = await listInboxMessages({ accessToken: auth.accessToken, sinceIso });
+    const items = messages.map((m) => {
+      const body = m.body?.content || m.bodyPreview || '';
+      const failedRecipient = extractFailedRecipient(body);
+      return {
+        sender: (m.from?.emailAddress?.address || '').trim().toLowerCase(),
+        subject: m.subject || '',
+        body, // FULL plain-text body (Prefer: text content-type)
+        receivedDateTime: m.receivedDateTime || null,
+        internetMessageId: m.internetMessageId || null,
+        webLink: m.webLink || null,
+        ...(failedRecipient ? { failedRecipient } : {}),
+      };
+    });
+    if (truncated) console.warn(`[mcpBridge] list-inbox ${auth.cred.email} hours=${hours}: TRUNCATED — page ceiling hit, result is partial`);
+    console.log(`[mcpBridge] list-inbox ${auth.cred.email} hours=${hours}: ${items.length} message(s)${truncated ? ' (TRUNCATED)' : ''}`);
+    return res.json({ ok: true, truncated, items });
+  } catch (err) {
+    return res.status(err.httpStatus || 502).json({ ok: false, error: err.message });
   }
 });
 

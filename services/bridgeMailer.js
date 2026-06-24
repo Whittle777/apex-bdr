@@ -313,10 +313,120 @@ async function sendReplyViaGraph({
   };
 }
 
+// ──────────────────────────────────────────────────────────────────────
+// Read-only Graph helpers — power the bridge's list-sent / list-inbox
+// endpoints (headless reconcile + reply scan). Scope: Mail.Read. These never
+// send or mutate; they only page GET /me/mailFolders/{folder}/messages.
+// ──────────────────────────────────────────────────────────────────────
+
+// Sent Items can be high-volume (this mailbox sends 200–750/day), so the
+// date-bounded window must page in FULL — a fixed row ceiling would silently
+// drop the oldest sends and make reconcile miss them. We page until
+// @odata.nextLink is exhausted, with a high safety ceiling (page size × maxPages)
+// and a `truncated` flag if that ceiling is ever hit. Inbox is low-volume.
+const SENT_PAGE_SIZE = 500;   // Graph allows up to 1000 for messages
+const SENT_MAX_PAGES = 40;    // ceiling ≈ 20,000 rows (14d × ~750/day ≈ 10.5k)
+const INBOX_PAGE_SIZE = 50;
+const INBOX_MAX_PAGES = 10;   // ceiling ≈ 500 rows — ample for a 26h inbox window
+
+/**
+ * GET a Graph collection, following @odata.nextLink up to maxPages. nextLink is
+ * an absolute URL, so we re-attach only the Authorization (and any Prefer)
+ * header on each hop. Returns { value, truncated } — truncated is true iff we
+ * stopped because we hit maxPages while Graph still had a next page (the caller
+ * must NOT treat a truncated set as complete). Throws GraphError on any non-2xx.
+ */
+async function graphGetAll({ accessToken, url, headers = {}, maxPages }) {
+  const out = [];
+  let next = url;
+  let pages = 0;
+  let truncated = false;
+  while (next) {
+    if (pages >= maxPages) { truncated = true; break; }
+    try {
+      const resp = await axios.get(next, {
+        headers: { Authorization: `Bearer ${accessToken}`, ...headers },
+        timeout: 20000,
+      });
+      if (Array.isArray(resp.data?.value)) out.push(...resp.data.value);
+      next = resp.data?.['@odata.nextLink'] || null;
+    } catch (err) {
+      const status = err.response?.status;
+      const graphErr = err.response?.data?.error;
+      const detail = graphErr?.message || graphErr?.code || err.message;
+      dumpGraph('GET (read) error', status, err.response?.headers, err.response?.data);
+      throw new GraphError(`Microsoft Graph read failed (status ${status || '?'}): ${detail}`, {
+        httpStatus: status === 403 ? 403 : 502,
+      });
+    }
+    pages += 1;
+  }
+  return { value: out, truncated };
+}
+
+/**
+ * List Sent Items sent at/after sinceIso, paging the full date-bounded window.
+ * Selects only the fields the reconcile feed needs (recipient + Message-ID +
+ * date + conversation). Newest first. Returns { value, truncated }.
+ */
+async function listSentMessages({ accessToken, sinceIso, maxPages = SENT_MAX_PAGES }) {
+  const select = 'internetMessageId,conversationId,subject,sentDateTime,toRecipients';
+  const url =
+    `${GRAPH}/me/mailFolders/sentitems/messages` +
+    `?$filter=${encodeURIComponent(`sentDateTime ge ${sinceIso}`)}` +
+    `&$orderby=${encodeURIComponent('sentDateTime desc')}` +
+    `&$top=${SENT_PAGE_SIZE}&$select=${select}`;
+  return graphGetAll({ accessToken, url, maxPages });
+}
+
+/**
+ * List Inbox messages received at/after sinceIso. The `Prefer:
+ * outlook.body-content-type="text"` header makes body.content the FULL
+ * plain-text body (not HTML, not a preview) — the negative-path classifier
+ * scans it for the failed prospect address inside NDRs. Returns { value, truncated }.
+ */
+async function listInboxMessages({ accessToken, sinceIso, maxPages = INBOX_MAX_PAGES }) {
+  const select = 'from,subject,body,bodyPreview,receivedDateTime,internetMessageId,webLink';
+  const url =
+    `${GRAPH}/me/mailFolders/inbox/messages` +
+    `?$filter=${encodeURIComponent(`receivedDateTime ge ${sinceIso}`)}` +
+    `&$orderby=${encodeURIComponent('receivedDateTime desc')}` +
+    `&$top=${INBOX_PAGE_SIZE}&$select=${select}`;
+  return graphGetAll({
+    accessToken,
+    url,
+    headers: { Prefer: 'outlook.body-content-type="text"' },
+    maxPages,
+  });
+}
+
+/**
+ * Best-effort: pull the original failed-recipient address out of an NDR/bounce
+ * body using the standard DSN headers (RFC 3464). Returns a lowercased address
+ * or null. Exact when present — makes bounce resolution unambiguous instead of
+ * fuzzy body-scanning. Conservative: only matches the canonical DSN markers.
+ */
+function extractFailedRecipient(body) {
+  if (typeof body !== 'string' || !body) return null;
+  const patterns = [
+    /Final-Recipient:\s*rfc822;\s*([^\s<>;,]+@[^\s<>;,]+)/i,
+    /Original-Recipient:\s*rfc822;\s*([^\s<>;,]+@[^\s<>;,]+)/i,
+    /X-Failed-Recipients:\s*([^\s<>;,]+@[^\s<>;,]+)/i,
+  ];
+  for (const re of patterns) {
+    const m = body.match(re);
+    if (m) return m[1].trim().toLowerCase();
+  }
+  return null;
+}
+
 module.exports = {
   GraphError,
   buildHtmlBody,
   resolveGraphMessageId,
   sendEmailViaGraph,
   sendReplyViaGraph,
+  listSentMessages,
+  listInboxMessages,
+  extractFailedRecipient,
 };
