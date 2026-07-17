@@ -31,7 +31,27 @@ const {
   MAX_BATCH_SIZE, REPLAY_WINDOW_MS, DEFAULT_DEDUPE_SCOPE,
   getBlockedDomains, dedupeStatesFor, rowDedupeKey,
   validateItem, decideBatch, countDecisions, domainIsBlocked, domainOf,
+  normalizeDomain,
 } = require('../services/enqueueBatch');
+const { enforceHenrySignature, recipientBlockReasons } = require('../services/sendGate');
+const { KINDS: BLOCKLIST_KINDS, getGateLists, invalidateGateLists } = require('../services/gateLists');
+
+// Content-gate rollout switch: on (default) rejects content-rule violations;
+// shadow observes + logs but accepts; off disables content rules entirely.
+// Recipient compliance (DNC/bounced/suppressed/held) is NOT governed by this —
+// it is always hard.
+function contentGateMode(env = process.env) {
+  const m = String(env.SEND_CONTENT_GATE || 'on').trim().toLowerCase();
+  return ['on', 'shadow', 'off'].includes(m) ? m : 'on';
+}
+
+// Effective blocked-domain set: static floor (env + defaults) ∪ DB held_domain
+// entries — so a domain held in the DB is enforced even before any env change.
+function unionBlockedDomains(gateLists) {
+  const s = new Set(getBlockedDomains());
+  for (const d of gateLists.heldDomains) s.add(d);
+  return s;
+}
 
 // Loose RFC 5322-ish check — good enough to catch obvious typos.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -133,6 +153,8 @@ function assembleBatchResult(batchId, decisions, trackingByIndex) {
       status: d.status,
       ...(d.status === 'accepted' && trackingByIndex[d.index] ? { trackingId: trackingByIndex[d.index] } : {}),
       ...(d.reason ? { reason: d.reason } : {}),
+      ...(d.signatureCorrected ? { signatureCorrected: true } : {}),
+      ...(d.shadowReasons ? { shadowGateReasons: d.shadowReasons } : {}),
     })),
   };
 }
@@ -179,6 +201,28 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     return res.status(422).json({ ok: false, status: 'rejected', reason: 'BLOCKED_DOMAIN', error: `Rejected: ${blocked}. Nothing was sent.` });
   }
 
+  // Internal @c3.ai recipients are the notification path (alerts/digests to
+  // Henry) — exempt from prospect compliance. External recipients get the hard
+  // recipient blocks + Henry signature enforcement; content rules (em-dash,
+  // CTA, links) do NOT apply to immediate Henry-approved mail.
+  let sendBody = body;
+  let signatureCorrected = false;
+  if (!String(to).trim().toLowerCase().endsWith('@c3.ai')) {
+    const rb = recipientBlockReasons(to, await getGateLists());
+    if (rb.length) {
+      console.warn(`[mcpBridge] send-email REJECTED blocklisted recipient → ${to} (${rb.join('; ')})`);
+      return res.status(422).json({ ok: false, status: 'rejected', reason: rb.join('; '), error: `Rejected: ${rb.join('; ')}. Nothing was sent.` });
+    }
+    const sig = enforceHenrySignature(body);
+    if (sig.error) {
+      console.warn(`[mcpBridge] send-email REJECTED rep signature → ${to} (${sig.error})`);
+      return res.status(422).json({ ok: false, status: 'rejected', reason: `SIGNATURE (${sig.error})`, error: `Rejected: ${sig.error}. Nothing was sent.` });
+    }
+    sendBody = sig.body;
+    signatureCorrected = sig.changed;
+    if (signatureCorrected) console.warn(`[mcpBridge] send-email signature auto-corrected to Henry → ${to}`);
+  }
+
   let cred;
   try {
     cred = await resolveCred(req, from);
@@ -195,7 +239,7 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
   }
 
   try {
-    const r = await sendEmailViaGraph({ accessToken: token.accessToken, to, subject, body, cc, bcc });
+    const r = await sendEmailViaGraph({ accessToken: token.accessToken, to, subject, body: sendBody, cc, bcc });
     console.log(`[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${r.elapsedMs}ms — messageId ${r.captured ? 'captured' : 'NOT captured'}`);
     return res.json({
       ok: true,
@@ -208,6 +252,7 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
       messageId: r.messageId,
       internetMessageId: r.internetMessageId,
       conversationId: r.conversationId,
+      ...(signatureCorrected ? { signatureCorrected: true } : {}),
       ...(r.captured ? {} : { warning: CAPTURE_WARNING + (r.lookupError ? ` Lookup error: ${r.lookupError}` : '') }),
       elapsedMs: r.elapsedMs,
     });
@@ -236,6 +281,21 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
     return res.status(422).json({ ok: false, status: 'rejected', reason: 'BLOCKED_DOMAIN', error: `Rejected: ${replyBlocked}. Nothing was sent.` });
   }
 
+  // Hard recipient blocks (a DNC'd or bounced prospect must not get a reply
+  // either) + Henry signature enforcement. Content rules don't apply to
+  // conversational replies.
+  const replyRb = recipientBlockReasons(to, await getGateLists());
+  if (replyRb.length) {
+    console.warn(`[mcpBridge] reply-email REJECTED blocklisted recipient → ${to} (${replyRb.join('; ')})`);
+    return res.status(422).json({ ok: false, status: 'rejected', reason: replyRb.join('; '), error: `Rejected: ${replyRb.join('; ')}. Nothing was sent.` });
+  }
+  const replySig = enforceHenrySignature(body);
+  if (replySig.error) {
+    console.warn(`[mcpBridge] reply-email REJECTED rep signature → ${to} (${replySig.error})`);
+    return res.status(422).json({ ok: false, status: 'rejected', reason: `SIGNATURE (${replySig.error})`, error: `Rejected: ${replySig.error}. Nothing was sent.` });
+  }
+  if (replySig.changed) console.warn(`[mcpBridge] reply-email signature auto-corrected to Henry → ${to}`);
+
   let cred;
   try {
     cred = await resolveCred(req, from);
@@ -256,7 +316,7 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
       accessToken: token.accessToken,
       to,
       inReplyToMessageId,
-      body,
+      body: replySig.body,
       cc,
       bcc,
       replyAll: !!replyAll,
@@ -284,6 +344,7 @@ router.post('/reply-email', requireBridgeAuth, async (req, res) => {
       messageId: r.messageId,
       internetMessageId: r.internetMessageId,
       conversationId: r.conversationId,
+      ...(replySig.changed ? { signatureCorrected: true } : {}),
       ...(r.captured ? {} : { warning: 'Reply was sent and threaded correctly, but the new messageId could not be read back from Sent Items in time. ' + (r.lookupError ? `Lookup error: ${r.lookupError}` : '') }),
       elapsedMs: r.elapsedMs,
     });
@@ -307,14 +368,21 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
 
   const isReply = ok(inReplyToMessageId);
   // Shared per-item validation (the SAME routine enqueue_batch loops) + the
-  // server-side blocklist, so single and batch sends can never diverge on what
-  // they accept (spec §8).
-  const v = validateItem({ to, subject, body, cc, bcc, inReplyToMessageId, scheduledFor }, { blockedDomains: getBlockedDomains() });
+  // server-side blocklists + content gate, so single and batch sends can never
+  // diverge on what they accept (spec §8).
+  const gateLists = await getGateLists();
+  const gateMode = contentGateMode();
+  const v = validateItem(
+    { to, subject, body, cc, bcc, inReplyToMessageId, scheduledFor, meta },
+    { blockedDomains: unionBlockedDomains(gateLists), gateLists, contentGate: gateMode === 'off' ? undefined : gateMode }
+  );
   if (!v.valid) {
-    const code = v.reason === 'BLOCKED_DOMAIN' ? 422 : 400;
-    if (v.reason === 'BLOCKED_DOMAIN') console.warn(`[mcpBridge] enqueue-email REJECTED held domain → ${to}`);
+    const code = v.reason === 'BLOCKED_DOMAIN' ? 422 : /^[A-Z_]+/.test(v.reason) ? 422 : 400;
+    if (code === 422) console.warn(`[mcpBridge] enqueue-email REJECTED → ${to}: ${v.reason}`);
     return res.status(code).json({ ok: false, status: 'rejected', reason: v.reason, error: `Rejected: ${v.reason}` });
   }
+  if (v.shadowReasons) console.warn(`[mcpBridge] enqueue-email SHADOW-GATE would reject → ${to}: ${v.shadowReasons.join('; ')}`);
+  if (v.signatureCorrected) console.warn(`[mcpBridge] enqueue-email signature auto-corrected to Henry → ${to}`);
   if (from && !isEmail(from)) return res.status(400).json({ ok: false, error: '"from" must be a valid email' });
   if (gate != null && !['proceed', 'warning', 'abort'].includes(gate)) {
     return res.status(400).json({ ok: false, error: '"gate" must be one of: proceed | warning | abort' });
@@ -365,7 +433,7 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
         trackingId,
         to: to || '',
         subject: subject || '',
-        body: body || '',
+        body: (v.cleanBody != null ? v.cleanBody : body) || '',
         cc: cc || null,
         bcc: bcc || null,
         inReplyToMessageId: inReplyToMessageId || null,
@@ -396,6 +464,7 @@ router.post('/enqueue-email', requireBridgeAuth, async (req, res) => {
       ...(clientRef != null ? { clientRef: String(clientRef) } : {}),
       queuePosition,
       estimatedSendAt: estimatedSendAt.toISOString(),
+      ...(v.signatureCorrected ? { signatureCorrected: true } : {}),
       note: 'Queued. The worker paces sends within the send window under the day\'s cap; gate=abort halts the day. Poll GET /api/mcp/queue?batchId=… for status + messageId.',
     });
   } catch (err) {
@@ -471,7 +540,10 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
   const cfg = getConfig();
   const localDate = localDateString(new Date(), cfg.tz);
   const batchId = ok(batchIdIn) ? String(batchIdIn) : `b_${crypto.randomUUID()}`;
-  const blockedDomains = getBlockedDomains();
+  const gateLists = await getGateLists();
+  const gateMode = contentGateMode();
+  const blockedDomains = unionBlockedDomains(gateLists);
+  const contentGate = gateMode === 'off' ? undefined : gateMode;
 
   try {
     // Record today's policy (cap/gate from Send Health), same as single-send.
@@ -486,7 +558,7 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
     // gate=abort → reject the WHOLE batch, accept none. Still returns a full
     // per-item report so the agent can surface it.
     if (gate === 'abort') {
-      const { decisions } = decideBatch({ items, existingKeys: new Set(), blockedDomains, dedupeScope, gate });
+      const { decisions } = decideBatch({ items, existingKeys: new Set(), blockedDomains, gateLists, contentGate, dedupeScope, gate });
       const result = assembleBatchResult(batchId, decisions, {});
       await storeBatchReceipt(idempotencyKey, cred.userId, batchId, result);
       console.log(`[mcpBridge] enqueue_batch ${batchId} (user ${cred.userId}) gate=abort — rejected all ${items.length}`);
@@ -505,7 +577,7 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
       existingKeys = new Set(rows.map(rowDedupeKey));
     }
 
-    const { decisions } = decideBatch({ items, existingKeys, blockedDomains, dedupeScope, gate });
+    const { decisions } = decideBatch({ items, existingKeys, blockedDomains, gateLists, contentGate, dedupeScope, gate });
 
     // Persist accepted items one-by-one (so a mid-batch crash leaves the
     // already-persisted rows queued; an idempotencyKey replay finishes the rest
@@ -522,7 +594,7 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
           trackingId,
           to: item.to || '',
           subject: item.subject || '',
-          body: item.body || '',
+          body: (d.cleanBody != null ? d.cleanBody : item.body) || '',
           cc: item.cc || null,
           bcc: item.bcc || null,
           inReplyToMessageId: item.inReplyToMessageId || null,
@@ -537,11 +609,23 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
       trackingByIndex[d.index] = trackingId;
     }
 
-    // Log any held-domain rejections so the workbook can raise a Review Queue row
+    // Log gate outcomes so the workbook can raise Review Queue rows
     // (compliance must be loud, never a silent skip).
     const blockedItems = decisions.filter((d) => d.reason === 'BLOCKED_DOMAIN');
     if (blockedItems.length) {
       console.warn(`[mcpBridge] enqueue_batch ${batchId}: REJECTED ${blockedItems.length} held-domain recipient(s): ${blockedItems.map((d) => d.to).join(', ')}`);
+    }
+    const gateRejected = decisions.filter((d) => d.status === 'rejected' && d.reason && d.reason !== 'BLOCKED_DOMAIN' && /^[A-Z_]+/.test(d.reason));
+    if (gateRejected.length) {
+      console.warn(`[mcpBridge] enqueue_batch ${batchId}: GATE REJECTED ${gateRejected.length} item(s): ${gateRejected.map((d) => `${d.to} [${d.reason}]`).join(' | ')}`);
+    }
+    const corrected = decisions.filter((d) => d.signatureCorrected);
+    if (corrected.length) {
+      console.warn(`[mcpBridge] enqueue_batch ${batchId}: signature auto-corrected to Henry on ${corrected.length} item(s): ${corrected.map((d) => d.to).join(', ')}`);
+    }
+    const shadow = decisions.filter((d) => d.shadowReasons && d.shadowReasons.length);
+    if (shadow.length) {
+      console.warn(`[mcpBridge] enqueue_batch ${batchId}: SHADOW-GATE would reject ${shadow.length} item(s): ${shadow.map((d) => `${d.to} [${d.shadowReasons.join('; ')}]`).join(' | ')}`);
     }
 
     const result = assembleBatchResult(batchId, decisions, trackingByIndex);
@@ -593,6 +677,78 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
     return res.json({ ok: true, total: shaped.length, counts, policy, items: shaped });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/blocklist?kind=&active= — list server-side blocklist entries.
+router.get('/blocklist', requireBridgeAuth, async (req, res) => {
+  const { kind, active } = req.query || {};
+  if (kind && !BLOCKLIST_KINDS.includes(String(kind))) {
+    return res.status(400).json({ ok: false, error: `"kind" must be one of: ${BLOCKLIST_KINDS.join(' | ')}` });
+  }
+  try {
+    const entries = await prisma.sendBlocklistEntry.findMany({
+      where: {
+        ...(kind ? { kind: String(kind) } : {}),
+        ...(active != null ? { active: String(active) !== 'false' } : {}),
+      },
+      orderBy: [{ kind: 'asc' }, { value: 'asc' }],
+    });
+    const counts = entries.reduce((acc, e) => ((acc[e.kind] = (acc[e.kind] || 0) + 1), acc), {});
+    return res.json({ ok: true, total: entries.length, counts, entries });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Blocklist lookup failed: ${err.message}` });
+  }
+});
+
+// POST /api/mcp/blocklist — upsert blocklist entries (idempotent; used by the
+// workbook seed/sync). Body: { entries: [{ kind, value, reason?, source?, active? }] }.
+// Values are normalized (lowercased; domains lose any leading "@"). Entries are
+// soft-disabled via active=false, never deleted.
+router.post('/blocklist', requireBridgeAuth, async (req, res) => {
+  const { entries } = req.body || {};
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return res.status(400).json({ ok: false, error: '"entries" must be a non-empty array' });
+  }
+  if (entries.length > 5000) {
+    return res.status(400).json({ ok: false, error: `Too many entries: ${entries.length} (max 5000 per call)` });
+  }
+  const results = { upserted: 0, rejected: [] };
+  try {
+    for (const [i, e] of entries.entries()) {
+      const kind = String(e?.kind || '');
+      if (!BLOCKLIST_KINDS.includes(kind)) {
+        results.rejected.push({ index: i, reason: `invalid kind "${kind}"` });
+        continue;
+      }
+      const isDomainKind = kind.endsWith('_domain');
+      const value = isDomainKind ? normalizeDomain(e.value) : String(e?.value || '').trim().toLowerCase();
+      if (!value || (isDomainKind ? !value.includes('.') : !isEmail(value))) {
+        results.rejected.push({ index: i, reason: `invalid ${isDomainKind ? 'domain' : 'email'} value "${e?.value}"` });
+        continue;
+      }
+      await prisma.sendBlocklistEntry.upsert({
+        where: { kind_value: { kind, value } },
+        update: {
+          ...(e.reason != null ? { reason: String(e.reason) } : {}),
+          ...(e.source != null ? { source: String(e.source) } : {}),
+          ...(e.active != null ? { active: e.active !== false } : {}),
+        },
+        create: {
+          kind,
+          value,
+          reason: e.reason != null ? String(e.reason) : null,
+          source: e.source != null ? String(e.source) : null,
+          active: e.active !== false,
+        },
+      });
+      results.upserted += 1;
+    }
+    invalidateGateLists();
+    console.log(`[mcpBridge] blocklist upsert: ${results.upserted} entr${results.upserted === 1 ? 'y' : 'ies'}, ${results.rejected.length} rejected`);
+    return res.json({ ok: true, ...results });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Blocklist upsert failed: ${err.message}` });
   }
 });
 

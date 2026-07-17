@@ -15,6 +15,8 @@
  *  - Pacing is untouched: this only decides WHAT enters the queue.
  */
 
+const { enforceHenrySignature, recipientBlockReasons, contentReasons } = require('./sendGate');
+
 // Loose RFC 5322-ish check — same shape used across the bridge.
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ok = (s) => typeof s === 'string' && s.trim().length > 0;
@@ -112,10 +114,21 @@ function rowDedupeKey(row) {
  * Validate one BatchItem. PURE. Returns the parsed shape on success or a
  * rejection reason. `blockedDomains` is a Set of lowercased domains.
  *
- * @returns {{ valid: true, isReply: boolean, normTo: string, scheduledForMs: number|null }
+ * Gate options (all optional, so existing callers/tests are unchanged):
+ *  - gateLists:   { dncEmails, bouncedEmails, suppressedDomains } Sets from
+ *                 services/gateLists.js — recipient compliance, always HARD
+ *                 when supplied.
+ *  - contentGate: 'on' | 'shadow' | falsy. 'on' rejects content-rule
+ *                 violations and rewrites rep signoffs to Henry (the corrected
+ *                 body comes back as `cleanBody`); 'shadow' only OBSERVES —
+ *                 the item is accepted unmodified and the would-be reasons
+ *                 come back as `shadowReasons` for logging.
+ *
+ * @returns {{ valid: true, isReply: boolean, normTo: string, scheduledForMs: number|null,
+ *             cleanBody?: string, signatureCorrected?: boolean, shadowReasons?: string[] }
  *          | { valid: false, reason: string }}
  */
-function validateItem(item, { blockedDomains } = {}) {
+function validateItem(item, { blockedDomains, gateLists, contentGate } = {}) {
   if (!item || typeof item !== 'object') return { valid: false, reason: 'item is not an object' };
 
   const isReply = ok(item.inReplyToMessageId);
@@ -137,11 +150,31 @@ function validateItem(item, { blockedDomains } = {}) {
     return { valid: false, reason: 'BLOCKED_DOMAIN' };
   }
 
+  // Recipient compliance (DNC / bounced / suppressed) — hard whenever lists
+  // are supplied, regardless of contentGate mode.
+  if (gateLists) {
+    const rb = recipientBlockReasons(normTo, gateLists);
+    if (rb.length) return { valid: false, reason: rb.join('; ') };
+  }
+
   let scheduledForMs = null;
   if (item.scheduledFor != null) {
     const t = new Date(item.scheduledFor).getTime();
     if (Number.isNaN(t)) return { valid: false, reason: 'invalid scheduledFor' };
     scheduledForMs = t;
+  }
+
+  // Content rules + signature enforcement (paced prospect paths).
+  if (contentGate === 'on' || contentGate === 'shadow') {
+    const meta = (item.meta && typeof item.meta === 'object') ? item.meta : {};
+    const reasons = contentReasons({ to: normTo, subject: item.subject, body: item.body, step: meta.step });
+    const sig = enforceHenrySignature(item.body);
+    if (sig.error) reasons.push(`SIGNATURE (${sig.error})`);
+    if (contentGate === 'shadow') {
+      return { valid: true, isReply, normTo, scheduledForMs, ...(reasons.length ? { shadowReasons: reasons } : {}) };
+    }
+    if (reasons.length) return { valid: false, reason: reasons.join('; ') };
+    return { valid: true, isReply, normTo, scheduledForMs, cleanBody: sig.body, signatureCorrected: sig.changed };
   }
 
   return { valid: true, isReply, normTo, scheduledForMs };
@@ -166,7 +199,7 @@ function validateItem(item, { blockedDomains } = {}) {
  *           status:'accepted'|'skipped_duplicate'|'rejected', reason?:string,
  *           isReply?:boolean }> }}
  */
-function decideBatch({ items, existingKeys, blockedDomains, dedupeScope = DEFAULT_DEDUPE_SCOPE, gate } = {}) {
+function decideBatch({ items, existingKeys, blockedDomains, gateLists, contentGate, dedupeScope = DEFAULT_DEDUPE_SCOPE, gate } = {}) {
   const list = Array.isArray(items) ? items : [];
   const existing = existingKeys instanceof Set ? existingKeys : new Set(existingKeys || []);
   const dedupOn = dedupeStatesFor(dedupeScope).length > 0; // 'none' disables dedup
@@ -180,7 +213,7 @@ function decideBatch({ items, existingKeys, blockedDomains, dedupeScope = DEFAUL
       return { ...base, status: 'rejected', reason: 'gate=abort' };
     }
 
-    const v = validateItem(item, { blockedDomains });
+    const v = validateItem(item, { blockedDomains, gateLists, contentGate });
     if (!v.valid) {
       return { ...base, status: 'rejected', reason: v.reason };
     }
@@ -194,7 +227,15 @@ function decideBatch({ items, existingKeys, blockedDomains, dedupeScope = DEFAUL
       return { ...base, status: 'skipped_duplicate', reason: 'duplicate within batch', isReply: v.isReply };
     }
     seenInBatch.add(key);
-    return { ...base, status: 'accepted', isReply: v.isReply, scheduledForMs: v.scheduledForMs };
+    return {
+      ...base,
+      status: 'accepted',
+      isReply: v.isReply,
+      scheduledForMs: v.scheduledForMs,
+      ...(v.cleanBody != null ? { cleanBody: v.cleanBody } : {}),
+      ...(v.signatureCorrected ? { signatureCorrected: true } : {}),
+      ...(v.shadowReasons ? { shadowReasons: v.shadowReasons } : {}),
+    };
   });
 
   return { decisions };
