@@ -335,7 +335,21 @@ export async function runEnqueueBatch({
  * item). Returns each item's status and, once sent, its messageId /
  * internetMessageId / conversationId so the caller can reconcile.
  */
-export async function runCheckEmailQueue({ batchId, trackingId, status, recipient, domain }) {
+export async function runCheckEmailQueue({ batchId, trackingId, status, recipient, domain, format }) {
+  // format:"json" returns the bridge's COMPLETE response as JSON — every item
+  // (no 50-row cap), every field (clientRef, meta, step, internetMessageId,
+  // graphItemId, sentAt, …). This is the reconcile/dedup-gate path: the text
+  // format is a human summary and MUST NOT be parsed for those.
+  if (format === 'json' && !trackingId) {
+    const r = await callBridge('/api/mcp/queue', { batchId, status, recipient, domain }, 'GET');
+    if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
+    return { isError: false, text: JSON.stringify({ total: r.total, counts: r.counts, policy: r.policy, items: r.items }) };
+  }
+  if (format === 'json' && trackingId) {
+    const r = await callBridge(`/api/mcp/queue/${encodeURIComponent(trackingId)}`, null, 'GET');
+    if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
+    return { isError: false, text: JSON.stringify(r.item || {}) };
+  }
   if (trackingId) {
     const r = await callBridge(`/api/mcp/queue/${encodeURIComponent(trackingId)}`, null, 'GET');
     if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
@@ -724,6 +738,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           status: { type: 'string', description: 'Optional filter: queued | paused | sending | sent | failed | cancelled.' },
           recipient: { type: 'string', description: 'Show items addressed to this exact email.' },
           domain: { type: 'string', description: 'Show items to this recipient domain, e.g. "amd.com".' },
+          format: { type: 'string', description: 'Output format: "text" (default, human summary, first 50 items) or "json" (complete machine-readable listing — EVERY item and field, no truncation). ALWAYS use "json" for reconciliation or pre-send dedup checks.' },
         },
       },
     },

@@ -345,6 +345,26 @@ model SendPolicy {
   @@unique([userId, localDate])
 }
 
+// Server-side send blocklist — the compliance floor every send path checks
+// (enqueue validation + the worker's final pre-send check). Seeded from the
+// workbook's lists (seq_engine HELD_DOMAINS / DNC / bounced / suppressed) and
+// maintained via /api/mcp/blocklist. Rows are soft-disabled (active=false),
+// never deleted, so the audit trail survives.
+// kind: held_domain | suppressed_domain | dnc_email | bounced_email
+model SendBlocklistEntry {
+  id        Int      @id @default(autoincrement())
+  kind      String
+  value     String // lowercased domain or email address
+  reason    String?
+  source    String? // e.g. "workbook-seed-2026-07-17", "bounce-sweep", "manual"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([kind, value])
+  @@index([kind, active])
+}
+
 // Replay guard for enqueue_batch. A caller-supplied idempotencyKey maps to the
 // BatchResult produced the first time that key was processed; a retry with the
 // same key returns the stored result instead of re-queuing. `result` holds the

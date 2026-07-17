@@ -22,6 +22,9 @@ const prisma = require('./database');
 const { getMicrosoftAccessToken } = require('./sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('./bridgeMailer');
 const { getConfig, localDateString, localHour, computeInterval, pickNextDecision, effectiveCap, WEEK_MS } = require('./sendPacing');
+const { getBlockedDomains, domainIsBlocked, domainOf } = require('./enqueueBatch');
+const { recipientBlockReasons } = require('./sendGate');
+const { getGateLists } = require('./gateLists');
 
 /**
  * Count messages already sent today (in the send tz) for a user. Low daily
@@ -152,6 +155,23 @@ async function drainQueue({ now = new Date() } = {}) {
       data: { status: 'sending', attempts: { increment: 1 } },
     });
     if (claim.count === 0) continue; // someone else grabbed it
+
+    // Final pre-send compliance check: a recipient DNC'd/bounced/held AFTER
+    // enqueue must not be sent to. Terminal cancel, never retried.
+    const gateLists = await getGateLists();
+    const preSendReasons = [
+      ...(item.to && domainIsBlocked(domainOf(item.to), new Set([...getBlockedDomains(), ...gateLists.heldDomains]))
+        ? [`BLOCKED_DOMAIN (${domainOf(item.to)})`] : []),
+      ...recipientBlockReasons(item.to, gateLists),
+    ];
+    if (preSendReasons.length) {
+      await prisma.outboundQueue.update({
+        where: { id: item.id },
+        data: { status: 'cancelled', failureReason: `blocked at send time: ${preSendReasons.join('; ')}` },
+      }).catch(() => {});
+      console.warn(`[sendQueueWorker] queue#${item.id} (user ${userId}) CANCELLED before send → ${item.to}: ${preSendReasons.join('; ')}`);
+      continue;
+    }
 
     try {
       const token = await getMicrosoftAccessToken(userId);
