@@ -34,6 +34,7 @@ const {
   normalizeDomain,
 } = require('../services/enqueueBatch');
 const { enforceHenrySignature, recipientBlockReasons } = require('../services/sendGate');
+const { computeBdrMetrics } = require('../services/bdrMetrics');
 const { KINDS: BLOCKLIST_KINDS, getGateLists, invalidateGateLists } = require('../services/gateLists');
 
 // Content-gate rollout switch: on (default) rejects content-rule violations;
@@ -749,6 +750,41 @@ router.post('/blocklist', requireBridgeAuth, async (req, res) => {
     return res.json({ ok: true, ...results });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Blocklist upsert failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/bdr-metrics?monday=&friday=&lastMonday=&lastFriday= — aggregate
+// the Bdr* shadow tables into metrics.py's field shapes (Phase 2 shadow
+// comparison). Week bounds are supplied by the caller so both sides bucket by
+// the identical Mon–Fri window. Read-only.
+router.get('/bdr-metrics', requireBridgeAuth, async (req, res) => {
+  const { monday, friday, lastMonday, lastFriday } = req.query || {};
+  try {
+    const meta = await prisma.bdrSnapshotMeta.findFirst({ orderBy: { id: 'desc' } });
+    if (!meta) return res.status(404).json({ ok: false, error: 'No BDR snapshot loaded yet (run scripts/bdrImport.js).' });
+    const sentRows = await prisma.bdrEmailLog.findMany({
+      where: { sendKey: { not: null } },
+      select: {
+        email: true, sendKey: true, isGroupRep: true, isInet: true, msgid: true, step: true,
+        effectiveStep: true, repDate: true, laneBucket: true, pid: true, rep: true, account: true,
+      },
+    });
+    const statusRows = await prisma.bdrEmailLog.findMany({
+      where: { emailId: { not: null } }, select: { sendStatus: true },
+    });
+    const seqRows = await prisma.bdrSequenceState.findMany({ select: { pid: true, replyStatus: true } });
+    const prospects = await prisma.bdrProspect.findMany({ select: { pid: true, email: true } });
+    const metrics = computeBdrMetrics({
+      sentRows, statusRows, seqRows, prospects,
+      weeks: { monday, friday, lastMonday, lastFriday },
+    });
+    return res.json({
+      ok: true,
+      snapshot: { wbSha256: meta.wbSha256, exportedAt: meta.exportedAt, importedAt: meta.importedAt },
+      metrics,
+    });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `bdr-metrics failed: ${err.message}` });
   }
 });
 

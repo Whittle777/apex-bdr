@@ -345,6 +345,132 @@ model SendPolicy {
   @@unique([userId, localDate])
 }
 
+// ─── BDR workbook shadow tables (Phase 2 of the SQL port) ────────────────────
+// A 1:1 mirror of the West Coast BDR workbook, loaded by a full-refresh import
+// (scripts/bdrImport.js) from the exporter's JSON snapshot. During the shadow
+// phase the WORKBOOK stays canonical; these tables exist to prove the DB
+// reproduces metrics.py's numbers exactly before any cutover.
+//
+// DELIBERATELY no relations to the app's live models (Prospect,
+// SequenceEnrollment, EmailActivity): the app's own schedulers act on those,
+// and migrated data must never be mistaken for app-managed sequences.
+// Rule-dependent derivations (send_dedup keys, group representatives,
+// effective steps) are computed AT EXPORT by the same Python code metrics.py
+// uses, so /api/mcp/bdr-metrics can aggregate without re-implementing rules.
+
+// Provenance of the currently loaded snapshot. One row per import; the latest
+// row describes what the Bdr* tables hold (wbSha256 ties every number back to
+// an exact workbook file state, same as metrics.py output).
+model BdrSnapshotMeta {
+  id           Int      @id @default(autoincrement())
+  importedAt   DateTime @default(now())
+  wbSha256     String
+  exportedAt   String // exporter's timestamp (local PT ISO)
+  prospectRows Int
+  emailLogRows Int
+  seqStateRows Int
+  note         String?
+}
+
+model BdrProspect {
+  id            Int     @id @default(autoincrement())
+  pid           String  @unique // "P####" or legacy 12-char hex
+  account       String?
+  firstName     String?
+  lastName      String?
+  title         String?
+  email         String? // lowercased; the workbook's global dedup key
+  linkedinUrl   String?
+  personaTier   String?
+  owningRep     String?
+  status        String?
+  dncFlag       Boolean @default(false)
+  notes         String?
+  directPhone   String?
+  mobilePhone   String?
+  callCount     Int?
+  lastCallOutcome String?
+  liConnectionStatus String?
+  extraJson     String? // every remaining workbook column, verbatim — nothing dropped
+
+  @@index([email])
+  @@index([account])
+}
+
+model BdrSequenceState {
+  id                  Int     @id @default(autoincrement())
+  pid                 String  @unique // Sequence State "ID" column
+  tier                String?
+  name                String?
+  account             String?
+  industry            String?
+  c3Product           String?
+  sequenceStarted     String? // dates kept as ISO strings (workbook mixes types)
+  currentStep         Int?
+  lastSent            String?
+  nextScheduled       String?
+  channelNext         String?
+  replyStatus         String? // canonical vocab (validated upstream)
+  personalizationJson String?
+  holdReason          String?
+  variant             String?
+  promptConfigVersion String?
+  liStep              Int?
+  liReplyStatus       String?
+  stepsJson           String? // the 7 per-step blocks (subject/date/mid/conv/…), verbatim
+  extraJson           String?
+
+  @@index([replyStatus])
+  @@index([account])
+}
+
+model BdrEmailLog {
+  id                Int     @id @default(autoincrement())
+  wbRow             Int     @unique // workbook row number — traceability + idempotent reload
+  emailId           String?
+  dateSent          String? // ISO as exported; original cell in extraJson if odd
+  rep               String?
+  repEmail          String?
+  account           String?
+  prospectName      String?
+  prospectTitle     String?
+  personaTier       String?
+  email             String? // lowercased recipient
+  subject           String?
+  body              String?
+  refCustomer       String?
+  outcome           String?
+  feedback          String?
+  step              Int? // Sequence Step as stamped on the row (null = pre-stamping)
+  variant           String?
+  promptCfg         String?
+  replySentiment    String?
+  posture           String? // NEW | REPLY
+  msgid             String?
+  conversationId    String?
+  pid               String?
+  bounceType        String?
+  sendStatus        String?
+  sendTimestamp     String?
+  lane              String?
+  graphItemId       String?
+  consolidationNote String?
+  // ── derived at export by the SHARED Python rules (send_dedup + metrics.py) ──
+  isInet            Boolean? // real RFC 5322 Message-ID vs EWS item-id
+  sendKey           String? // serialized send_dedup key; rows sharing it = one physical send
+  isGroupRep        Boolean  @default(false) // this row is the group's representative (metrics' rule)
+  repDate           String? // representative's send date (ISO) — drives weekly buckets
+  effectiveStep     Int? // metrics.py sent_by_step_effective inference (reps only)
+  laneBucket        String? // metrics.py _lane_bucket(lane, repEmail) (reps only)
+  extraJson         String?
+
+  @@index([email])
+  @@index([pid])
+  @@index([sendStatus])
+  @@index([sendKey])
+  @@index([isGroupRep])
+}
+
 // Server-side send blocklist — the compliance floor every send path checks
 // (enqueue validation + the worker's final pre-send check). Seeded from the
 // workbook's lists (seq_engine HELD_DOMAINS / DNC / bounced / suppressed) and
