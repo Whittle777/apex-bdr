@@ -23,6 +23,7 @@ const router = express.Router();
 
 const prisma = require('../services/database');
 const { getMicrosoftAccessToken } = require('../services/sequenceMailer');
+const { listSentItems, listInboxItems } = require('../services/graphMcpRead');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('../services/bridgeMailer');
 const { localDateString, getConfig } = require('../services/sendPacing');
 const { getSendPolicyStatus } = require('../services/sendQueueWorker');
@@ -183,6 +184,46 @@ const CAPTURE_WARNING =
 // GET /api/mcp/health — unauth'd liveness.
 router.get('/health', (req, res) => {
   res.json({ ok: true, bridgeEnabled: !!process.env.MCP_BRIDGE_TOKEN });
+});
+
+// GET /api/mcp/list-sent?days=N — READ-ONLY. Henry's Sent Items (external
+// recipients, real Message-IDs) for the headless reconcile. Additive; never sends.
+router.get('/list-sent', requireBridgeAuth, async (req, res) => {
+  let cred;
+  try {
+    cred = await resolveCred(req);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
+  }
+  if (!cred) return res.status(412).json({ ok: false, error: credError(req) });
+  try {
+    const { accessToken } = await getMicrosoftAccessToken(cred.userId);
+    const items = await listSentItems({ accessToken, days: req.query.days });
+    return res.json({ ok: true, items });
+  } catch (err) {
+    console.error('[mcpBridge] list-sent failed:', err.response?.data || err.message);
+    return res.status(502).json({ ok: false, error: `list-sent failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/list-inbox?hours=N — READ-ONLY. Henry's Inbox (full plain-text
+// bodies) for the headless reply-scan. Additive; never sends.
+router.get('/list-inbox', requireBridgeAuth, async (req, res) => {
+  let cred;
+  try {
+    cred = await resolveCred(req);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
+  }
+  if (!cred) return res.status(412).json({ ok: false, error: credError(req) });
+  try {
+    const { accessToken } = await getMicrosoftAccessToken(cred.userId);
+    const items = await listInboxItems({ accessToken, hours: req.query.hours });
+    return res.json({ ok: true, items });
+  } catch (err) {
+    console.error('[mcpBridge] list-inbox failed:', err.response?.data || err.message);
+    return res.status(502).json({ ok: false, error: `list-inbox failed: ${err.message}` });
+  }
 });
 
 // POST /api/mcp/send-email — immediate one-off send. Body: { to, subject, body, cc?, bcc?, from? }
