@@ -24,6 +24,7 @@ const { sendEmailViaGraph, sendReplyViaGraph } = require('./bridgeMailer');
 const { getConfig, localDateString, localHour, computeInterval, pickNextDecision, effectiveCap, WEEK_MS } = require('./sendPacing');
 const { getBlockedDomains, domainIsBlocked, domainOf } = require('./enqueueBatch');
 const { recipientBlockReasons } = require('./sendGate');
+const { adjustGreetingForSendTime } = require('./greetingAdjust');
 const { getGateLists } = require('./gateLists');
 
 /**
@@ -175,12 +176,19 @@ async function drainQueue({ now = new Date() } = {}) {
 
     try {
       const token = await getMicrosoftAccessToken(userId);
+      // Time-based greetings ("Good morning") are drafted hours before the paced queue
+      // actually dispatches — recompute against the real send clock and the recipient's
+      // tz offset (meta.recipientTzOffsetHours, relative to the send tz) so the greeting
+      // matches the moment the email lands. Bodies without one pass through unchanged.
+      let tzOffset = 0;
+      try { tzOffset = Number(JSON.parse(item.meta || '{}').recipientTzOffsetHours) || 0; } catch (_) { /* opaque meta */ }
+      const bodyToSend = adjustGreetingForSendTime(item.body, localHour(new Date(), cfg.tz), tzOffset);
       const result = item.inReplyToMessageId
         ? await sendReplyViaGraph({
             accessToken: token.accessToken,
             to: item.to, // the prospect — reply must go here, NOT the parent's sender
             inReplyToMessageId: item.inReplyToMessageId,
-            body: item.body,
+            body: bodyToSend,
             cc: item.cc,
             bcc: item.bcc,
             replyAll: item.replyAll,
@@ -191,7 +199,7 @@ async function drainQueue({ now = new Date() } = {}) {
             accessToken: token.accessToken,
             to: item.to,
             subject: item.subject,
-            body: item.body,
+            body: bodyToSend,
             cc: item.cc,
             bcc: item.bcc,
           });
