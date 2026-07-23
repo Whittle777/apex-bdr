@@ -270,19 +270,38 @@ async function sendReplyViaGraph({
     throw new GraphError(`Microsoft Graph rejected the reply (status ${status || '?'}): ${detail}`, { httpStatus: 502 });
   }
 
-  // Poll Sent Items by subject; the most-recent same-subject reply is ours.
-  // We also read its toRecipients to VERIFY it went to the prospect, not us.
+  // Poll Sent Items by subject, then disambiguate BY RECIPIENT.
+  //
+  // BUGFIX 2026-07-23 — this used to pass `toEmail: undefined` on the assumption recorded in the
+  // old comment here, "the most-recent same-subject reply is ours". That assumption is false for
+  // cadence sends: two prospects at the SAME company share a step-3 subject, so their step-4
+  // replies share `replySubject`, and the paced worker sends them seconds apart — well inside this
+  // 60s `sinceIso` window. Both polls then took `candidates[0]` and got the SAME Sent-Items
+  // message, so apex recorded ONE internetMessageId + graphItemId for TWO different prospects.
+  // Observed on 2026-06-23/06-25/07-15/07-23; every affected pair was reply-posture, same-domain,
+  // identical subject. Downstream this makes the Message-ID ambiguous, and the workbook's
+  // reply-threading guard then (correctly) refuses to thread any future step-5/6 onto it.
+  //
+  // The non-reply send path above never had this bug — it passes `toEmail`.
+  //
+  // We still need to spot a MISDIRECTED reply (one Graph sent to the mailbox owner), which by
+  // definition won't match the prospect — hence `fallbackToNewest` + the `matchedBy` check.
   let found = null;
   let lookupError = null;
+  let matchedBy = null;
   const replySubject = originalSubject
     ? (originalSubject.toLowerCase().startsWith('re:') ? originalSubject : `Re: ${originalSubject}`)
     : null;
   if (replySubject) {
     try {
-      const r = await pollSentMessage({ accessToken, toEmail: undefined, subject: replySubject, sinceIso, debug });
+      const r = await pollSentMessage({
+        accessToken, toEmail: toAddrs[0], subject: replySubject, sinceIso,
+        fallbackToNewest: true, debug,
+      });
       found = r.message;
+      matchedBy = r.matchedBy;
       lookupError = r.lastError;
-      if (debug) console.error(`[bridgeMailer] reply poll: ${found ? 'hit' : 'miss'} after ${r.attempts} attempt(s)`);
+      if (debug) console.error(`[bridgeMailer] reply poll: ${found ? `hit (${matchedBy})` : 'miss'} after ${r.attempts} attempt(s)`);
     } catch (err) {
       lookupError = err.message;
     }
@@ -297,10 +316,19 @@ async function sendReplyViaGraph({
     console.error(`[bridgeMailer] REPLY MISDIRECTED — sent to ${sentToAddrs.join(', ')} (the sending mailbox), not the intended ${toAddrs.join(', ')}. Graph did not honor the recipient override.`);
   }
 
+  // Only an exact recipient match is OUR message. A 'newest' fallback is some other prospect's
+  // same-subject reply (or the misdirected copy), so its ids must NOT be reported as this send's
+  // capture — that is exactly how one Message-ID ended up on two prospects. A null here is
+  // honest and already handled downstream ("null (not captured)"); a wrong id is not recoverable.
+  const captured = matchedBy === 'recipient' ? found : null;
+  if (found && !captured && !misdirected) {
+    console.warn(`[bridgeMailer] Sent-Items capture MISS for ${toAddrs[0]}: found a same-subject reply addressed elsewhere (concurrent same-company send). Reporting internetMessageId=null rather than a colliding id.`);
+  }
+
   return {
     graphMessageId,
-    messageId: found?.id || null,
-    internetMessageId: found?.internetMessageId || null,
+    messageId: captured?.id || null,
+    internetMessageId: captured?.internetMessageId || null,
     // conversationId is reliable even on a poll miss — the reply inherits the
     // original's conversation, which we fetched above.
     conversationId: found?.conversationId || originalConversationId || null,

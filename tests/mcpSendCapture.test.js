@@ -116,6 +116,49 @@ describe('send_email messageId capture (poll-with-backoff)', () => {
     expect(match.toRecipients[0].emailAddress.address).toBe('target@x.com');
   });
 
+  // 2026-07-23: two prospects at one company get identical reply subjects seconds apart, so a
+  // same-subject poll can only be resolved by recipient. These pin the contract the reply path
+  // now depends on (see services/bridgeMailer.js).
+  test('a same-subject send to a DIFFERENT recipient is never returned as a recipient match', async () => {
+    const subject = 'Re: Shared company subject';
+    const http = fakeGraph({ indexAfter: 0, message: sentMessage('other@x.com', subject) });
+
+    const { message, matchedBy } = await pollSentMessage({
+      accessToken: 'tok', toEmail: 'target@x.com', subject, http, sleep: noopSleep, attempts: 2,
+    });
+
+    expect(message).toBeNull();          // without the fallback: an explicit miss
+    expect(matchedBy).toBeNull();
+  });
+
+  test('fallbackToNewest surfaces the other message but tags it "newest", not "recipient"', async () => {
+    const subject = 'Re: Shared company subject';
+    const other = sentMessage('other@x.com', subject);
+    const http = fakeGraph({ indexAfter: 0, message: other });
+
+    const { message, matchedBy } = await pollSentMessage({
+      accessToken: 'tok', toEmail: 'target@x.com', subject, http, sleep: noopSleep,
+      attempts: 2, fallbackToNewest: true,
+    });
+
+    expect(message).toBe(other);         // available for the misdirection check
+    expect(matchedBy).toBe('newest');    // but explicitly NOT our capture
+  });
+
+  test('an exact recipient match still wins and is tagged "recipient"', async () => {
+    const subject = 'Re: Shared company subject';
+    const mine = sentMessage('target@x.com', subject);
+    const http = fakeGraph({ indexAfter: 0, message: mine });
+
+    const { message, matchedBy } = await pollSentMessage({
+      accessToken: 'tok', toEmail: 'TARGET@x.com', subject, http, sleep: noopSleep,
+      attempts: 2, fallbackToNewest: true,
+    });
+
+    expect(message).toBe(mine);
+    expect(matchedBy).toBe('recipient');
+  });
+
   test('recovery utility backfills ids for already-sent messages', async () => {
     const to = 'jane@internal.example.com';
     const subject = 'Quick question, Jane';
