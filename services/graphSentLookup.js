@@ -70,13 +70,23 @@ function matchByRecipient(candidates, toEmail) {
 /**
  * Poll Sent Items until the just-sent message is found or attempts run out.
  *
- * @returns {Promise<{ message: object|null, attempts: number, lastError: string|null }>}
+ * @returns {Promise<{ message: object|null, attempts: number, lastError: string|null,
+ *                     matchedBy: 'recipient'|'newest'|null }>}
  *
  * Timing: with the defaults (5 attempts, 500ms base, 3500ms cap) the worst
  * case adds ~500+1000+2000+3500 = ~7s of sleeps plus query time — kept
  * comfortably under the MCP client's 15s request timeout. A hit on the
  * first or second attempt returns in well under 2s, matching the original
  * happy-path latency.
+ *
+ * `fallbackToNewest` (2026-07-23): when a recipient is supplied we require an EXACT recipient
+ * match, because two same-subject sends can be in flight at once — that is what caused apex to
+ * hand one internetMessageId to two prospects (see bridgeMailer's reply path). But the reply path
+ * also has to detect a MISDIRECTED send, one that Graph delivered to the mailbox owner instead of
+ * the prospect, and such a message can never match the intended recipient. So with this flag set
+ * we keep polling for an exact match and, only if none ever appears, return the newest
+ * same-subject candidate tagged `matchedBy: 'newest'` so the caller can run its misdirection
+ * check. Never treat a 'newest' result as a confirmed capture without checking `matchedBy`.
  */
 async function pollSentMessage({
   accessToken,
@@ -88,10 +98,12 @@ async function pollSentMessage({
   attempts = 5,
   baseDelayMs = 500,
   maxDelayMs = 3500,
+  fallbackToNewest = false,
   debug = false,
 }) {
   const since = sinceIso || new Date(Date.now() - 5 * 60 * 1000).toISOString();
   let lastError = null;
+  let newest = null;   // most recent same-subject candidate seen, for the fallback
   for (let i = 0; i < attempts; i++) {
     if (i > 0) {
       const delay = Math.min(baseDelayMs * 2 ** (i - 1), maxDelayMs);
@@ -100,14 +112,19 @@ async function pollSentMessage({
     try {
       const candidates = await querySentItems({ accessToken, sinceIso: since, subject, http, debug });
       const match = matchByRecipient(candidates, toEmail);
-      if (match) return { message: match, attempts: i + 1, lastError: null };
+      if (match) return { message: match, attempts: i + 1, lastError: null, matchedBy: 'recipient' };
+      if (fallbackToNewest && !newest && candidates.length) newest = candidates[0];
       if (debug) console.error(`[graphSentLookup] attempt ${i + 1}/${attempts}: not indexed yet`);
     } catch (err) {
       lastError = err.message;
       if (debug) console.error(`[graphSentLookup] attempt ${i + 1}/${attempts} query failed: ${err.message}`);
     }
   }
-  return { message: null, attempts, lastError };
+  if (fallbackToNewest && newest) {
+    if (debug) console.error('[graphSentLookup] no recipient match; returning newest same-subject candidate for the misdirection check');
+    return { message: newest, attempts, lastError, matchedBy: 'newest' };
+  }
+  return { message: null, attempts, lastError, matchedBy: null };
 }
 
 /**

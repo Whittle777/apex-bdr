@@ -32,19 +32,25 @@ const SENT_PARENT = {
   body: { contentType: 'text', content: 'original body' },
 };
 
-function mockGraph({ parent = SENT_PARENT, sentToRecipients } = {}) {
+function mockGraph({ parent = SENT_PARENT, sentToRecipients, matchedBy } = {}) {
   axios.get.mockImplementation((url) => {
     if (url.includes('$select=id')) return Promise.resolve({ data: { id: 'PARENTID' } }); // resolveGraphMessageId
     if (url.includes('$select=subject')) return Promise.resolve({ data: parent });        // GET original
     return Promise.resolve({ data: {} });
   });
   axios.post.mockResolvedValue({ status: 202, headers: {}, data: null });
+  // Mirror the real pollSentMessage contract (2026-07-23): it reports HOW it matched, so the
+  // caller can tell "this is our message" from "this is some other same-subject reply".
+  const addrs = (sentToRecipients || []).map((r) => r.emailAddress.address.toLowerCase());
+  const resolvedMatchedBy = matchedBy
+    || (sentToRecipients ? (addrs.includes(PROSPECT.toLowerCase()) ? 'recipient' : 'newest') : null);
   pollSentMessage.mockResolvedValue({
     message: sentToRecipients
       ? { id: 'SENTID', internetMessageId: '<reply@c3.ai>', conversationId: 'CONV123', subject: 'Re: Quick question', toRecipients: sentToRecipients }
       : null,
     attempts: 1,
     lastError: null,
+    matchedBy: resolvedMatchedBy,
   });
 }
 
@@ -113,6 +119,35 @@ describe('sendReplyViaGraph — recipient is the prospect, not the parent sender
       accessToken: 'tok', to: PROSPECT, inReplyToMessageId: 'PARENTID', body: 'hi', selfEmail: SELF,
     });
     expect(r.misdirected).toBe(true);
+  });
+
+  // Regression: one internetMessageId must never be reported for two different prospects.
+  // Two prospects at the same company share a step-3 subject, so their step-4 replies share
+  // `replySubject` and the paced worker sends them seconds apart, inside the same 60s poll window.
+  // The poll used to pass toEmail:undefined and take candidates[0], so BOTH sends were credited
+  // with the same Sent-Items message. Observed 2026-06-23/06-25/07-15/07-23.
+  test('the reply poll is disambiguated BY RECIPIENT, not "newest same-subject wins"', async () => {
+    mockGraph({ sentToRecipients: [{ emailAddress: { address: PROSPECT } }] });
+    await sendReplyViaGraph({
+      accessToken: 'tok', to: PROSPECT, inReplyToMessageId: 'PARENTID', body: 'hi', selfEmail: SELF,
+    });
+    const args = pollSentMessage.mock.calls[0][0];
+    expect(args.toEmail).toBe(PROSPECT);          // NOT undefined — this is the fix
+    expect(args.fallbackToNewest).toBe(true);     // still able to spot a misdirected send
+  });
+
+  test('a same-subject reply addressed to ANOTHER prospect is not claimed as ours', async () => {
+    const OTHER = 'someone.else@prospect.com';
+    // Poll found only the other prospect's concurrent reply → matchedBy 'newest', not ours.
+    mockGraph({ sentToRecipients: [{ emailAddress: { address: OTHER } }] });
+    const r = await sendReplyViaGraph({
+      accessToken: 'tok', to: PROSPECT, inReplyToMessageId: 'PARENTID', body: 'hi', selfEmail: SELF,
+    });
+    // Report a capture MISS rather than the colliding id.
+    expect(r.messageId).toBeNull();
+    expect(r.internetMessageId).toBeNull();
+    expect(r.misdirected).toBe(false);            // it went to a prospect, just not this one
+    expect(r.conversationId).toBe('CONV123');     // conversation is still reliable
   });
 
   test('falls back to the parent To line (minus self) when no explicit `to`', async () => {
