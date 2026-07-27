@@ -50,21 +50,67 @@ function buildHtmlBody(body) {
   return HTML_TAG.test(linked) ? linked : linked.replace(/\n/g, '<br/>');
 }
 
+// Graph's POST /me/sendMail accepts a message up to ~4MB total in a single
+// request (larger needs an upload session we deliberately don't use). Guard the
+// base64 attachment payload well under that so a send can never silently 413.
+const MAX_ATTACH_B64_BYTES = 3.5 * 1024 * 1024;
+
+/**
+ * Map resolved attachment descriptors to Graph fileAttachment objects. Each
+ * input is { name, contentType, contentBytes (base64, no data: prefix),
+ * isInline?, contentId? }. Inline images (isInline + contentId) are referenced
+ * from the HTML body as <img src="cid:CONTENTID">; a plain attachment omits both.
+ * Throws GraphError('attachment_too_large') if the combined payload would exceed
+ * the single-request ceiling.
+ */
+function buildGraphAttachments(attachments) {
+  const list = Array.isArray(attachments) ? attachments.filter(Boolean) : [];
+  if (!list.length) return null;
+  let total = 0;
+  const out = list.map((a) => {
+    const bytes = String(a.contentBytes || '');
+    total += bytes.length;
+    return {
+      '@odata.type': '#microsoft.graph.fileAttachment',
+      name: a.name || 'attachment',
+      contentType: a.contentType || 'application/octet-stream',
+      contentBytes: bytes,
+      // Inline only when a contentId is present AND isInline isn't false — an
+      // inline part with no contentId renders nowhere and just bloats the mail.
+      ...(a.contentId && a.isInline !== false
+        ? { isInline: true, contentId: String(a.contentId) }
+        : { isInline: false }),
+    };
+  });
+  if (total > MAX_ATTACH_B64_BYTES) {
+    throw new GraphError(
+      `Attachments too large for a single send (${Math.round(total / 1024)}KB base64 > ${Math.round(MAX_ATTACH_B64_BYTES / 1024)}KB ceiling).`,
+      { httpStatus: 413, code: 'attachment_too_large' }
+    );
+  }
+  return out;
+}
+
 /**
  * Send a brand-new email via POST /me/sendMail, then poll Sent Items to
  * recover the Graph messageId / internetMessageId / conversationId.
  * Returns { messageId, internetMessageId, conversationId, captured,
  * lookupError, elapsedMs }. Throws GraphError if the send itself fails.
+ *
+ * `attachments` (optional): resolved descriptors [{name,contentType,contentBytes,
+ * isInline?,contentId?}]. Inline images are referenced from the body via cid:.
  */
-async function sendEmailViaGraph({ accessToken, to, subject, body, cc, bcc, debug = GRAPH_DEBUG }) {
+async function sendEmailViaGraph({ accessToken, to, subject, body, cc, bcc, attachments, debug = GRAPH_DEBUG }) {
   const startedAt = Date.now();
   const htmlBody = buildHtmlBody(body);
+  const graphAttachments = buildGraphAttachments(attachments);
   const message = {
     subject,
     body: { contentType: 'HTML', content: htmlBody },
     toRecipients: [{ emailAddress: { address: to } }],
     ...(cc ? { ccRecipients: [{ emailAddress: { address: cc } }] } : {}),
     ...(bcc ? { bccRecipients: [{ emailAddress: { address: bcc } }] } : {}),
+    ...(graphAttachments ? { attachments: graphAttachments } : {}),
   };
 
   // Lookup window opens just before the send so the poll's
@@ -344,6 +390,7 @@ async function sendReplyViaGraph({
 module.exports = {
   GraphError,
   buildHtmlBody,
+  buildGraphAttachments,
   resolveGraphMessageId,
   sendEmailViaGraph,
   sendReplyViaGraph,

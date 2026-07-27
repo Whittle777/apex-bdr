@@ -21,6 +21,7 @@
 const prisma = require('./database');
 const { getMicrosoftAccessToken } = require('./sequenceMailer');
 const { sendEmailViaGraph, sendReplyViaGraph } = require('./bridgeMailer');
+const { resolveAttachmentRefs } = require('./emailAssets');
 const { getConfig, localDateString, localHour, computeInterval, pickNextDecision, effectiveCap, WEEK_MS } = require('./sendPacing');
 const { getBlockedDomains, domainIsBlocked, domainOf } = require('./enqueueBatch');
 const { recipientBlockReasons } = require('./sendGate');
@@ -183,6 +184,26 @@ async function drainQueue({ now = new Date() } = {}) {
       let tzOffset = 0;
       try { tzOffset = Number(JSON.parse(item.meta || '{}').recipientTzOffsetHours) || 0; } catch (_) { /* opaque meta */ }
       const bodyToSend = adjustGreetingForSendTime(item.body, localHour(new Date(), cfg.tz), tzOffset);
+
+      // Resolve inline-image attachments (new-send path only). A missing/unknown
+      // asset is a terminal config error — fail the row loudly rather than send an
+      // imageless email with a dangling <img src="cid:…">.
+      let resolvedAttachments = [];
+      if (!item.inReplyToMessageId && item.attachments) {
+        let refs = null;
+        try { refs = JSON.parse(item.attachments); } catch (_) { refs = null; }
+        try {
+          resolvedAttachments = await resolveAttachmentRefs(refs);
+        } catch (aerr) {
+          await prisma.outboundQueue.update({
+            where: { id: item.id },
+            data: { status: 'failed', failureReason: `attachment resolve failed (not retried): ${aerr.message}` },
+          }).catch(() => {});
+          console.error(`[sendQueueWorker] queue#${item.id} (user ${userId}) attachment resolve FAILED → ${item.to}: ${aerr.message} — marked failed, NOT sent imageless`);
+          continue;
+        }
+      }
+
       const result = item.inReplyToMessageId
         ? await sendReplyViaGraph({
             accessToken: token.accessToken,
@@ -202,6 +223,7 @@ async function drainQueue({ now = new Date() } = {}) {
             body: bodyToSend,
             cc: item.cc,
             bcc: item.bcc,
+            attachments: resolvedAttachments,
           });
 
       // A reply that landed back at the sending mailbox is a TERMINAL failure —

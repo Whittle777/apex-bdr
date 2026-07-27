@@ -35,6 +35,7 @@ const {
   normalizeDomain,
 } = require('../services/enqueueBatch');
 const { enforceHenrySignature, recipientBlockReasons } = require('../services/sendGate');
+const { createAsset, existingAssetIds, resolveAttachmentRefs, AssetError } = require('../services/emailAssets');
 const { computeBdrMetrics } = require('../services/bdrMetrics');
 const { KINDS: BLOCKLIST_KINDS, getGateLists, invalidateGateLists } = require('../services/gateLists');
 
@@ -226,9 +227,46 @@ router.get('/list-inbox', requireBridgeAuth, async (req, res) => {
   }
 });
 
-// POST /api/mcp/send-email — immediate one-off send. Body: { to, subject, body, cc?, bcc?, from? }
+// POST /api/mcp/upload-asset — store an inline-image asset ONCE; returns { assetId }.
+// Body: { name, contentType, contentBytesB64, from? }. Reference the returned
+// assetId from send-email / enqueue-batch items via
+//   attachments: [{ assetId, contentId: "orderalloc", inline: true }]
+// and put <img src="cid:orderalloc"> in the body.
+router.post('/upload-asset', requireBridgeAuth, async (req, res) => {
+  const { name, contentType, contentBytesB64, from } = req.body || {};
+  let cred;
+  try {
+    cred = await resolveCred(req, from);
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `Credential lookup failed: ${err.message}` });
+  }
+  try {
+    const asset = await createAsset({ name, contentType, contentBytesB64, userId: cred ? cred.userId : null });
+    console.log(`[mcpBridge] upload-asset ${asset.assetId} "${asset.name}" (${asset.byteSize} bytes, ${asset.contentType})`);
+    return res.json({ ok: true, ...asset });
+  } catch (err) {
+    if (err instanceof AssetError) return res.status(err.httpStatus || 400).json({ ok: false, error: err.message });
+    console.error('[mcpBridge] upload-asset failed:', err.message);
+    return res.status(500).json({ ok: false, error: `Upload failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/assets — list stored assets (metadata only, no bytes) for verification.
+router.get('/assets', requireBridgeAuth, async (req, res) => {
+  try {
+    const rows = await prisma.emailAsset.findMany({
+      orderBy: { createdAt: 'desc' }, take: 50,
+      select: { assetId: true, name: true, contentType: true, byteSize: true, createdAt: true },
+    });
+    return res.json({ ok: true, assets: rows });
+  } catch (err) {
+    return res.status(500).json({ ok: false, error: `List assets failed: ${err.message}` });
+  }
+});
+
+// POST /api/mcp/send-email — immediate one-off send. Body: { to, subject, body, cc?, bcc?, from?, attachments? }
 router.post('/send-email', requireBridgeAuth, async (req, res) => {
-  const { to, subject, body, cc, bcc, from } = req.body || {};
+  const { to, subject, body, cc, bcc, from, attachments } = req.body || {};
 
   if (!isEmail(to)) return res.status(400).json({ ok: false, error: '"to" must be a valid email' });
   if (!ok(subject)) return res.status(400).json({ ok: false, error: '"subject" is required' });
@@ -280,9 +318,17 @@ router.post('/send-email', requireBridgeAuth, async (req, res) => {
     return res.status(502).json({ ok: false, error: `Microsoft token refresh failed: ${err.message}` });
   }
 
+  let resolvedAttachments;
   try {
-    const r = await sendEmailViaGraph({ accessToken: token.accessToken, to, subject, body: sendBody, cc, bcc });
-    console.log(`[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${r.elapsedMs}ms — messageId ${r.captured ? 'captured' : 'NOT captured'}`);
+    resolvedAttachments = await resolveAttachmentRefs(attachments);
+  } catch (err) {
+    if (err instanceof AssetError) return res.status(err.httpStatus || 400).json({ ok: false, error: err.message });
+    return res.status(500).json({ ok: false, error: `Attachment resolve failed: ${err.message}` });
+  }
+
+  try {
+    const r = await sendEmailViaGraph({ accessToken: token.accessToken, to, subject, body: sendBody, cc, bcc, attachments: resolvedAttachments });
+    console.log(`[mcpBridge] sent ${cred.email} → ${to} ("${subject}") in ${r.elapsedMs}ms — messageId ${r.captured ? 'captured' : 'NOT captured'}${resolvedAttachments.length ? ` — ${resolvedAttachments.length} attachment(s)` : ''}`);
     return res.json({
       ok: true,
       status: 'sent',
@@ -566,6 +612,33 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
   }
   if (!cred) return res.status(412).json({ ok: false, error: credError(req, from) });
 
+  // ── Validate inline-image attachment refs up front ───────────────────────
+  // Shape check + confirm every referenced assetId exists. All items in this
+  // campaign share the same 2 graphics, so a missing asset is a whole-batch
+  // config error — fail fast and loud here (pre-persist) rather than let the
+  // worker's per-row guard fail 142 rows one by one at send time.
+  const referencedAssetIds = [];
+  for (let i = 0; i < items.length; i++) {
+    const at = items[i] && items[i].attachments;
+    if (at == null) continue;
+    if (!Array.isArray(at)) {
+      return res.status(400).json({ ok: false, error: `item[${i}].attachments must be an array` });
+    }
+    for (const ref of at) {
+      if (!ref || typeof ref.assetId !== 'string' || !ref.assetId.trim()) {
+        return res.status(400).json({ ok: false, error: `item[${i}].attachments[] requires a string "assetId"` });
+      }
+      referencedAssetIds.push(ref.assetId);
+    }
+  }
+  if (referencedAssetIds.length) {
+    const present = await existingAssetIds(referencedAssetIds);
+    const missing = [...new Set(referencedAssetIds.filter((id) => !present.has(id)))];
+    if (missing.length) {
+      return res.status(422).json({ ok: false, error: `unknown assetId(s): ${missing.join(', ')}. Upload via /upload-asset first.` });
+    }
+  }
+
   // ── Idempotency replay: same key within the window → return stored result ─
   if (ok(idempotencyKey)) {
     try {
@@ -645,6 +718,7 @@ router.post('/enqueue-batch', requireBridgeAuth, async (req, res) => {
           batchId,
           clientRef: item.clientRef != null ? String(item.clientRef) : null,
           meta: item.meta != null ? JSON.stringify(item.meta) : null,
+          attachments: item.attachments != null ? JSON.stringify(item.attachments) : null,
           scheduledFor: scheduledForDate || null,
         },
       });

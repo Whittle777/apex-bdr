@@ -11,18 +11,18 @@ datasource db {
 }
 
 model User {
-  id          Int      @id @default(autoincrement())
-  email       String   @unique
-  name        String?
-  azureAdId   String?  // Azure AD object ID (oid) — required for Teams Calls API
+  id                Int       @id @default(autoincrement())
+  email             String    @unique
+  name              String?
+  azureAdId         String? // Azure AD object ID (oid) — required for Teams Calls API
   // Per-user MCP bridge token (Claude Desktop). Plaintext is shown to
   // the user once at generation; we only persist a SHA-256 hash so a DB
   // leak doesn't expose the token. mcpTokenHint stores the last 4 chars
   // of the plaintext so the UI can show "ending in …ABCD".
-  mcpTokenHash       String?
-  mcpTokenHint       String?
-  mcpTokenCreatedAt  DateTime?
-  createdAt   DateTime @default(now())
+  mcpTokenHash      String?
+  mcpTokenHint      String?
+  mcpTokenCreatedAt DateTime?
+  createdAt         DateTime  @default(now())
 
   sequences              Sequence[]
   integrationCredentials IntegrationCredential[]
@@ -34,45 +34,45 @@ model User {
 }
 
 model Account {
-  id                  Int        @id @default(autoincrement())
-  name                String
-  domain              String?
-  website             String?
-  industry            String?
-  subIndustry         String?
-  revenue             String?    // e.g. "$10M–$50M"
-  employees           String?    // e.g. "100–500"
-  country             String?
-  region              String?
-  city                String?
-  description         String?
-  notes               String?
-  researchSummary     String?    // AI / uploaded account-level research brief; flows into prospect brief generation
-  status              String     @default("prospect") // prospect | customer | churned | partner
-  tier                String?    // enterprise | mid-market | smb
-  techStack           String?
-  tags                String?    // JSON array
-  linkedInUrl         String?
-  twitterUrl          String?
-  foundedYear         Int?
+  id                 Int        @id @default(autoincrement())
+  name               String
+  domain             String?
+  website            String?
+  industry           String?
+  subIndustry        String?
+  revenue            String? // e.g. "$10M–$50M"
+  employees          String? // e.g. "100–500"
+  country            String?
+  region             String?
+  city               String?
+  description        String?
+  notes              String?
+  researchSummary    String? // AI / uploaded account-level research brief; flows into prospect brief generation
+  status             String     @default("prospect") // prospect | customer | churned | partner
+  tier               String? // enterprise | mid-market | smb
+  techStack          String?
+  tags               String? // JSON array
+  linkedInUrl        String?
+  twitterUrl         String?
+  foundedYear        Int?
   // FY27 account-tracker fields (from BDR Excel import)
-  priorityTier        String?    // A-Existing | A-Priority | B-Pursue | B-Watch
-  dealMotion          String?
-  targetCloseDate     DateTime?
-  closeQuarter        String?
-  useCases            String?    // free text — top use cases for personalization
-  primaryStakeholder  String?
-  backupStakeholders  String?
-  warmIntroPaths      String?
-  weeklyFocus         String?
-  outreachStatus      String?    // Not Started | Research Phase | Outreach Sent | In Conv...
-  lastContactedAt     DateTime?
-  myNotes             String?
-  rep                 String?    // denormalized rep name from Excel
-  createdAt           DateTime   @default(now())
-  updatedAt           DateTime   @updatedAt
-  prospects           Prospect[]
-  owners              User[]
+  priorityTier       String? // A-Existing | A-Priority | B-Pursue | B-Watch
+  dealMotion         String?
+  targetCloseDate    DateTime?
+  closeQuarter       String?
+  useCases           String? // free text — top use cases for personalization
+  primaryStakeholder String?
+  backupStakeholders String?
+  warmIntroPaths     String?
+  weeklyFocus        String?
+  outreachStatus     String? // Not Started | Research Phase | Outreach Sent | In Conv...
+  lastContactedAt    DateTime?
+  myNotes            String?
+  rep                String? // denormalized rep name from Excel
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  prospects          Prospect[]
+  owners             User[]
 }
 
 model Prospect {
@@ -90,8 +90,8 @@ model Prospect {
   country             String?
   region              String?
   techStack           String?
-  tags                String?   // JSON array of strings e.g. '["enterprise","Q2-target"]'
-  trackingPixelData   String?   // JSON string — legacy enrichment data (phone, linkedIn, timezone)
+  tags                String? // JSON array of strings e.g. '["enterprise","Q2-target"]'
+  trackingPixelData   String? // JSON string — legacy enrichment data (phone, linkedIn, timezone)
   accountId           Int?
   account             Account?             @relation(fields: [accountId], references: [id], onDelete: SetNull)
   ownedById           Int?
@@ -138,9 +138,9 @@ model SequenceStep {
   body            String          @default("")
   // AI personalization (Track B)
   aiPersonalize   Boolean         @default(false)
-  aiPurpose       String?         // one-line intent — e.g. "Cold open, hook with priority use case"
-  aiInstructions  String?         // multi-line voice/style/constraint guide
-  aiModel         String?         // override provider model — e.g. "gemini-2.5-pro"
+  aiPurpose       String? // one-line intent — e.g. "Cold open, hook with priority use case"
+  aiInstructions  String? // multi-line voice/style/constraint guide
+  aiModel         String? // override provider model — e.g. "gemini-2.5-pro"
   // Threading: when true, the step is sent as a reply to the most recent
   // sent email for this enrollment, so it appears in the same Outlook
   // thread instead of starting a fresh one.
@@ -153,24 +153,24 @@ model SequenceStep {
 }
 
 model SequenceEnrollment {
-  id               Int             @id @default(autoincrement())
-  prospectId       Int
-  sequenceId       Int
-  currentStepOrder Int             @default(0)
-  status           String          @default("active")
-  nextStepDue      DateTime?
-  lastContactedAt  DateTime?
-  completedAt      DateTime?
-  optedOutAt       DateTime?
-  pausedAt         DateTime?
-  pausedReason     String?
-  resumeAt         DateTime?
-  enrolledAt       DateTime        @default(now())
-  createdAt        DateTime        @default(now())
-  updatedAt        DateTime        @updatedAt
-  enrolledById     Int?
-  enrolledBy       User?           @relation("EnrolledBy", fields: [enrolledById], references: [id], onDelete: SetNull)
-  emailActivities  EmailActivity[]
+  id                Int               @id @default(autoincrement())
+  prospectId        Int
+  sequenceId        Int
+  currentStepOrder  Int               @default(0)
+  status            String            @default("active")
+  nextStepDue       DateTime?
+  lastContactedAt   DateTime?
+  completedAt       DateTime?
+  optedOutAt        DateTime?
+  pausedAt          DateTime?
+  pausedReason      String?
+  resumeAt          DateTime?
+  enrolledAt        DateTime          @default(now())
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+  enrolledById      Int?
+  enrolledBy        User?             @relation("EnrolledBy", fields: [enrolledById], references: [id], onDelete: SetNull)
+  emailActivities   EmailActivity[]
   callActivities    CallActivity[]
   replyActivities   ReplyActivity[]
   meetingActivities MeetingActivity[]
@@ -186,19 +186,19 @@ model EmailActivity {
   prospectId        Int
   sequenceStepId    Int
   enrollmentId      Int
-  status            String    @default("sent")  // sent | opened | failed | cancelled | draft_pending | rejected
+  status            String    @default("sent") // sent | opened | failed | cancelled | draft_pending | rejected
   subject           String    @default("")
   scheduledFor      DateTime?
   sentAt            DateTime?
   openedAt          DateTime?
   failureReason     String?
-  externalMessageId String?   // Nodemailer Message-ID for In-Reply-To matching
+  externalMessageId String? // Nodemailer Message-ID for In-Reply-To matching
   // AI personalization draft fields (Track B)
-  draftBody         String?   // AI-generated body awaiting HITL approval
-  draftPrompt       String?   // full prompt sent to the model (for HITL display + regenerate)
-  draftReasoning    String?   // model's reasoning chain (if returned)
-  draftModel        String?   // e.g. "gemini-2.5-pro"
-  draftProvider     String?   // "gemini" | "claude"
+  draftBody         String? // AI-generated body awaiting HITL approval
+  draftPrompt       String? // full prompt sent to the model (for HITL display + regenerate)
+  draftReasoning    String? // model's reasoning chain (if returned)
+  draftModel        String? // e.g. "gemini-2.5-pro"
+  draftProvider     String? // "gemini" | "claude"
   createdAt         DateTime  @default(now())
 
   prospect     Prospect           @relation(fields: [prospectId], references: [id], onDelete: Cascade)
@@ -217,7 +217,7 @@ model CallActivity {
   completedAt    DateTime?
   durationSecs   Int?
   notes          String?
-  outcome        String?   // connected | voicemail | no_answer | left_message
+  outcome        String? // connected | voicemail | no_answer | left_message
   createdAt      DateTime  @default(now())
 
   prospect     Prospect            @relation(fields: [prospectId], references: [id], onDelete: Cascade)
@@ -236,7 +236,7 @@ model ReplyActivity {
   // ooo | genuine_reply | bounce | unsubscribe | unknown
   classification    String
   oooReturnDate     DateTime?
-  externalMessageId String?   // Message-ID of the reply, for deduplication
+  externalMessageId String? // Message-ID of the reply, for deduplication
   receivedAt        DateTime
   processedAt       DateTime?
   createdAt         DateTime  @default(now())
@@ -246,17 +246,17 @@ model ReplyActivity {
 }
 
 model MeetingActivity {
-  id           Int       @id @default(autoincrement())
+  id           Int      @id @default(autoincrement())
   prospectId   Int
   enrollmentId Int?
-  title        String    @default("Meeting")
+  title        String   @default("Meeting")
   scheduledFor DateTime
   durationMins Int?
-  outcome      String?   // completed | no_show | rescheduled | cancelled
+  outcome      String? // completed | no_show | rescheduled | cancelled
   notes        String?
-  source       String    @default("manual") // manual | call_outcome
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  source       String   @default("manual") // manual | call_outcome
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   prospect   Prospect            @relation(fields: [prospectId], references: [id], onDelete: Cascade)
   enrollment SequenceEnrollment? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
@@ -270,7 +270,7 @@ model IntegrationCredential {
   refreshToken String?
   email        String?
   userId       Int
-  tenantId     String?  // Microsoft tenant ID (tid) — required for Calls API app token
+  tenantId     String? // Microsoft tenant ID (tid) — required for Calls API app token
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -284,7 +284,7 @@ model VmRecording {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   name         String
   durationSecs Float?
-  audioData    Bytes    // WAV PCM 16kHz 16-bit mono — required format for Microsoft Graph playPrompt
+  audioData    Bytes // WAV PCM 16kHz 16-bit mono — required format for Microsoft Graph playPrompt
   mimeType     String   @default("audio/wav")
   createdAt    DateTime @default(now())
 }
@@ -314,6 +314,12 @@ model OutboundQueue {
   // meta: opaque caller-supplied JSON blob (e.g. {"step":2,"lane":1}). Stored and
   // returned verbatim; the connector never inspects or validates it.
   meta                String?
+  // attachments: JSON array of inline-image REFERENCES (not bytes), e.g.
+  // [{"assetId":"asset_ab12","contentId":"orderalloc","inline":true}]. The bytes
+  // live once in EmailAsset; the worker resolves each ref at send time and passes
+  // #microsoft.graph.fileAttachment objects to Graph. Kept as refs (not inline
+  // base64) so a 142-item batch POST stays small and the DB stores each image once.
+  attachments         String?
   status              String    @default("queued") // queued | paused | sending | sent | failed | cancelled
   attempts            Int       @default(0)
   scheduledFor        DateTime? // earliest-eligible time (default: now); future-dating allowed
@@ -327,6 +333,25 @@ model OutboundQueue {
   @@index([userId, status])
   @@index([batchId])
   @@index([clientRef])
+}
+
+// EmailAsset — a binary asset (currently inline email images) stored ONCE and
+// referenced by many OutboundQueue rows via {assetId, contentId}. Storing the
+// base64 here (instead of inline on every queue row) keeps a 142-item batch
+// enqueue small and avoids duplicating a ~300KB image 142×. The worker loads the
+// asset at send time and hands Graph a #microsoft.graph.fileAttachment with
+// isInline + contentId, which the body references as <img src="cid:CONTENTID">.
+model EmailAsset {
+  id           Int      @id @default(autoincrement())
+  assetId      String   @unique // stable handle returned to the caller (asset_<uuid>)
+  userId       Int? // optional owner (the uploading Microsoft account)
+  name         String // filename Graph shows, e.g. "order-allocation-A.png"
+  contentType  String // MIME, e.g. "image/png"
+  contentBytes String // base64 payload (NO data: prefix) — the raw file bytes
+  byteSize     Int      @default(0) // decoded byte length, for sanity/limits
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
 }
 
 // Per-user, per-day send policy. Cap + gate are supplied by the Cowork
@@ -373,25 +398,25 @@ model BdrSnapshotMeta {
 }
 
 model BdrProspect {
-  id            Int     @id @default(autoincrement())
-  pid           String  @unique // "P####" or legacy 12-char hex
-  account       String?
-  firstName     String?
-  lastName      String?
-  title         String?
-  email         String? // lowercased; the workbook's global dedup key
-  linkedinUrl   String?
-  personaTier   String?
-  owningRep     String?
-  status        String?
-  dncFlag       Boolean @default(false)
-  notes         String?
-  directPhone   String?
-  mobilePhone   String?
-  callCount     Int?
-  lastCallOutcome String?
+  id                 Int     @id @default(autoincrement())
+  pid                String  @unique // "P####" or legacy 12-char hex
+  account            String?
+  firstName          String?
+  lastName           String?
+  title              String?
+  email              String? // lowercased; the workbook's global dedup key
+  linkedinUrl        String?
+  personaTier        String?
+  owningRep          String?
+  status             String?
+  dncFlag            Boolean @default(false)
+  notes              String?
+  directPhone        String?
+  mobilePhone        String?
+  callCount          Int?
+  lastCallOutcome    String?
   liConnectionStatus String?
-  extraJson     String? // every remaining workbook column, verbatim — nothing dropped
+  extraJson          String? // every remaining workbook column, verbatim — nothing dropped
 
   @@index([email])
   @@index([account])
@@ -425,8 +450,8 @@ model BdrSequenceState {
 }
 
 model BdrEmailLog {
-  id                Int     @id @default(autoincrement())
-  wbRow             Int     @unique // workbook row number — traceability + idempotent reload
+  id                Int      @id @default(autoincrement())
+  wbRow             Int      @unique // workbook row number — traceability + idempotent reload
   emailId           String?
   dateSent          String? // ISO as exported; original cell in extraJson if odd
   rep               String?
