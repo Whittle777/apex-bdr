@@ -76,11 +76,17 @@ async function listInboxItems({ accessToken, hours = 26, folder = 'inbox' }) {
   // must be able to scan it — not just the Inbox.
   const FOLDERS = { inbox: 'inbox', junkemail: 'junkemail', junk: 'junkemail',
                     deleteditems: 'deleteditems', deleted: 'deleteditems', archive: 'archive' };
-  const mailFolder = FOLDERS[String(folder || 'inbox').toLowerCase()] || 'inbox';
+  const key = String(folder || 'inbox').toLowerCase();
   const sinceIso = new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
   const filter = encodeURIComponent(`receivedDateTime ge ${sinceIso}`);
+  // folder=all reads the mailbox-wide /me/messages collection, which spans EVERY
+  // folder including custom folders an inbox rule may have filed NDRs into (the
+  // named-folder reads miss those). Otherwise read the one well-known folder.
+  const base = key === 'all'
+    ? `${GRAPH}/me/messages`
+    : `${GRAPH}/me/mailFolders/${FOLDERS[key] || 'inbox'}/messages`;
   const url =
-    `${GRAPH}/me/mailFolders/${mailFolder}/messages` +
+    `${base}` +
     `?$top=${PAGE_SIZE}&$orderby=receivedDateTime desc` +
     `&$select=subject,body,from,receivedDateTime,internetMessageId,webLink` +
     `&$filter=${filter}`;
