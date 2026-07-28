@@ -69,12 +69,17 @@ async function listSentItems({ accessToken, days = 4 }) {
  * message. `body` is the FULL plain-text body (Prefer: text) — the NDR/bounce
  * classifier scans it for the failed prospect address, so a preview won't do.
  */
-async function listInboxItems({ accessToken, hours = 26 }) {
+async function listInboxItems({ accessToken, hours = 26, folder = 'inbox' }) {
   const h = Math.min(Math.max(parseInt(hours, 10) || 26, 1), 168);
+  // Allowlist the well-known mail folders we read. Junk is where Microsoft/
+  // postmaster NDR (bounce) reports frequently land, so the bounce classifier
+  // must be able to scan it — not just the Inbox.
+  const FOLDERS = { inbox: 'inbox', junkemail: 'junkemail', junk: 'junkemail' };
+  const mailFolder = FOLDERS[String(folder || 'inbox').toLowerCase()] || 'inbox';
   const sinceIso = new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
   const filter = encodeURIComponent(`receivedDateTime ge ${sinceIso}`);
   const url =
-    `${GRAPH}/me/mailFolders/inbox/messages` +
+    `${GRAPH}/me/mailFolders/${mailFolder}/messages` +
     `?$top=${PAGE_SIZE}&$orderby=receivedDateTime desc` +
     `&$select=subject,body,from,receivedDateTime,internetMessageId,webLink` +
     `&$filter=${filter}`;

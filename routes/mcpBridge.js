@@ -219,7 +219,7 @@ router.get('/list-inbox', requireBridgeAuth, async (req, res) => {
   if (!cred) return res.status(412).json({ ok: false, error: credError(req) });
   try {
     const { accessToken } = await getMicrosoftAccessToken(cred.userId);
-    const items = await listInboxItems({ accessToken, hours: req.query.hours });
+    const items = await listInboxItems({ accessToken, hours: req.query.hours, folder: req.query.folder });
     return res.json({ ok: true, items });
   } catch (err) {
     console.error('[mcpBridge] list-inbox failed:', err.response?.data || err.message);
