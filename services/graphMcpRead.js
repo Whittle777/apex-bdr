@@ -74,7 +74,8 @@ async function listInboxItems({ accessToken, hours = 26, folder = 'inbox' }) {
   // Allowlist the well-known mail folders we read. Junk is where Microsoft/
   // postmaster NDR (bounce) reports frequently land, so the bounce classifier
   // must be able to scan it — not just the Inbox.
-  const FOLDERS = { inbox: 'inbox', junkemail: 'junkemail', junk: 'junkemail' };
+  const FOLDERS = { inbox: 'inbox', junkemail: 'junkemail', junk: 'junkemail',
+                    deleteditems: 'deleteditems', deleted: 'deleteditems', archive: 'archive' };
   const mailFolder = FOLDERS[String(folder || 'inbox').toLowerCase()] || 'inbox';
   const sinceIso = new Date(Date.now() - h * 60 * 60 * 1000).toISOString();
   const filter = encodeURIComponent(`receivedDateTime ge ${sinceIso}`);
