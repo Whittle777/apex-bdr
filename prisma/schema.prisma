@@ -191,6 +191,8 @@ model EmailActivity {
   scheduledFor      DateTime?
   sentAt            DateTime?
   openedAt          DateTime?
+  clickedAt         DateTime? // first tracked link click (click implies open)
+  clickCount        Int       @default(0) // total tracked link clicks
   failureReason     String?
   externalMessageId String? // Nodemailer Message-ID for In-Reply-To matching
   // AI personalization draft fields (Track B)

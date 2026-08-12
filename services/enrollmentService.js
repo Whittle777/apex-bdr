@@ -245,6 +245,28 @@ async function recordOpen(prospectId, sequenceStepId) {
 }
 
 /**
+ * Record a link click on the most recent sent EmailActivity for this
+ * prospect+step. A click implies the email was opened, so openedAt and
+ * status are backfilled too.
+ */
+async function recordClick(prospectId, sequenceStepId) {
+  const activity = await prisma.emailActivity.findFirst({
+    where: { prospectId, sequenceStepId, status: { in: ['sent', 'opened'] } },
+    orderBy: { sentAt: 'desc' },
+  });
+  if (!activity) return null;
+  return prisma.emailActivity.update({
+    where: { id: activity.id },
+    data: {
+      status: 'opened',
+      openedAt: activity.openedAt || new Date(),
+      clickedAt: activity.clickedAt || new Date(),
+      clickCount: { increment: 1 },
+    },
+  });
+}
+
+/**
  * Get all active enrollments where nextStepDue is now or in the past.
  * Used by the cron scheduler to find what to send.
  */
@@ -298,6 +320,7 @@ module.exports = {
   markReplied,
   recordStepSent,
   recordOpen,
+  recordClick,
   getDueEnrollments,
   getProspectEnrollments,
 };

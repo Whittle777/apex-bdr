@@ -120,30 +120,40 @@ const SequenceManager = () => {
     api.get('/prospects').then(r => setAllProspects(r.data || [])).catch(() => {});
   }, []);
 
+  // Guards against out-of-order responses when the user switches
+  // sequences quickly: only the most recently requested sequence's
+  // response is allowed to land in state.
+  const emailsReqRef = useRef(null);
+
   const fetchEmails = async (seqId) => {
     if (!seqId) return;
+    emailsReqRef.current = seqId;
     setEmailsLoading(true);
     try {
       const res = await api.get(`/email-activities/sequence/${seqId}`);
+      if (emailsReqRef.current !== seqId) return; // stale response — drop it
       setEmailItems(res.data || []);
     } catch (err) {
+      if (emailsReqRef.current !== seqId) return;
       console.error('Failed to load emails', err);
       setEmailItems([]);
     } finally {
-      setEmailsLoading(false);
+      if (emailsReqRef.current === seqId) setEmailsLoading(false);
     }
   };
 
   useEffect(() => {
-    // Also fetch on Steps tab so per-step stat panels can compute from
-    // real EmailActivity counts (otherwise the panels just don't render).
-    if ((activeTab === 'emails' || activeTab === 'steps') && activeSequenceId) {
+    // Fetch on every tab: the Emails tab and per-step stat panels read
+    // emailItems directly, and the right-pane Engagement section (visible
+    // on all tabs) needs it too.
+    if (activeSequenceId) {
       fetchEmails(activeSequenceId);
     }
   }, [activeTab, activeSequenceId]);
 
   // Reset email/call/reply state when sequence changes
   useEffect(() => {
+    setEmailItems([]);
     setSelectedEmailKeys(new Set());
     setReschedulingKey(null);
     setSelectedCallKeys(new Set());
@@ -1142,14 +1152,17 @@ const SequenceManager = () => {
                               if (acts.length === 0) return null;
                               const sent   = acts.filter(a => a.status === 'sent' || a.status === 'opened').length;
                               const opened = acts.filter(a => a.status === 'opened').length;
+                              const clicked = acts.filter(a => a.clickedAt).length;
                               const failed = acts.filter(a => a.status === 'failed').length;
                               const openRate = sent > 0 ? Math.round((opened / sent) * 100) : 0;
+                              const clickRate = sent > 0 ? Math.round((clicked / sent) * 100) : 0;
                               return (
-                                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:0, marginTop:10, borderTop:'1px solid var(--border-subtle)', paddingTop:8 }}>
+                                <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:0, marginTop:10, borderTop:'1px solid var(--border-subtle)', paddingTop:8 }}>
                                   {[
-                                    { label:'Sent',   value: sent,                  color:'var(--text-secondary)' },
-                                    { label:'Opened', value: `${openRate}%`,        color: sent === 0 ? 'var(--text-muted)' : openRate >= 40 ? 'var(--status-success)' : openRate >= 25 ? 'var(--status-warning)' : 'var(--status-danger)' },
-                                    { label:'Failed', value: failed,                color: failed > 0 ? 'var(--status-danger)' : 'var(--text-secondary)' },
+                                    { label:'Sent',    value: sent,                  color:'var(--text-secondary)' },
+                                    { label:'Opened',  value: `${openRate}%`,        color: sent === 0 ? 'var(--text-muted)' : openRate >= 40 ? 'var(--status-success)' : openRate >= 25 ? 'var(--status-warning)' : 'var(--status-danger)' },
+                                    { label:'Clicked', value: `${clickRate}%`,       color: sent === 0 ? 'var(--text-muted)' : clickRate >= 10 ? 'var(--status-success)' : clickRate >= 3 ? 'var(--status-warning)' : 'var(--text-secondary)' },
+                                    { label:'Failed',  value: failed,                color: failed > 0 ? 'var(--status-danger)' : 'var(--text-secondary)' },
                                   ].map(({ label, value, color }, i, arr) => (
                                     <div key={label} style={{ textAlign:'center', borderRight: i < arr.length - 1 ? '1px solid var(--border-subtle)' : 'none' }}>
                                       <div style={{ fontSize:'0.62rem', color:'var(--text-muted)', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:2 }}>{label}</div>
@@ -1866,6 +1879,11 @@ const SequenceManager = () => {
                                   }}>
                                     {item.status}
                                   </span>
+                                  {item.clickedAt && (
+                                    <div style={{ fontSize: '0.68rem', color: 'var(--status-success)', marginTop: 2 }} title={`Link clicked ${item.clickCount > 1 ? `${item.clickCount} times` : 'once'}`}>
+                                      ↗ Clicked {new Date(item.clickedAt).toLocaleString([], { dateStyle: 'short', timeStyle: 'short' })}
+                                    </div>
+                                  )}
                                   {item.failureReason && (
                                     <div style={{ fontSize: '0.68rem', color: 'var(--status-danger)', marginTop: 2 }} title={item.failureReason}>
                                       {item.failureReason.length > 40 ? item.failureReason.slice(0, 40) + '…' : item.failureReason}
@@ -2510,6 +2528,36 @@ const SequenceManager = () => {
               ))}
             </div>
           </div>
+
+          {/* Engagement — open/click tracking. Honest empty: only rendered
+              once real EmailActivity rows exist for this sequence. */}
+          {(() => {
+            const acts = emailItems.filter(it => it.type === 'activity');
+            const sent = acts.filter(a => a.status === 'sent' || a.status === 'opened').length;
+            if (sent === 0) return null;
+            const opened = acts.filter(a => a.status === 'opened').length;
+            const clicked = acts.filter(a => a.clickedAt).length;
+            const openRate = Math.round((opened / sent) * 100);
+            const clickRate = Math.round((clicked / sent) * 100);
+            const rows = [
+              { label: 'Sent', value: sent, color: 'var(--text-primary)' },
+              { label: 'Open rate', value: `${openRate}% (${opened})`, color: openRate >= 40 ? 'var(--status-success)' : openRate >= 25 ? 'var(--status-warning)' : 'var(--status-danger)' },
+              { label: 'Click rate', value: `${clickRate}% (${clicked})`, color: clickRate >= 10 ? 'var(--status-success)' : clickRate >= 3 ? 'var(--status-warning)' : 'var(--text-secondary)' },
+            ];
+            return (
+              <div>
+                <div style={{ fontSize: '0.68rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 8 }}>Engagement</div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 5 }}>
+                  {rows.map(({ label, value, color }) => (
+                    <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 7, fontSize: '0.8rem' }}>
+                      <span style={{ flex: 1, color: 'var(--text-secondary)' }}>{label}</span>
+                      <span style={{ fontWeight: 700, color }}>{value}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
 
           {/* Step timeline */}
           {stepTimeline.length > 0 && (

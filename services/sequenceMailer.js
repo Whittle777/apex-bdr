@@ -21,6 +21,7 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const crypto = require('crypto');
 const { getDueEnrollments, recordStepSent } = require('./enrollmentService');
+const { buildOpenPixelUrl, wrapLinksForClickTracking } = require('./trackingLinks');
 const { personalize } = require('./emailPersonalizer');
 const hitlRouter = require('../routes/hitl');
 
@@ -136,8 +137,10 @@ async function sendViaGraph(accessToken, fromEmail, toEmail, subject, htmlBody) 
  */
 async function findPriorSentForEnrollment(enrollmentId) {
   if (!enrollmentId) return { exists: false, externalMessageId: null };
+  // 'opened' is a sent email whose tracking pixel fired — include it or
+  // reply threading breaks as soon as a prospect opens the prior email.
   const prior = await prisma.emailActivity.findFirst({
-    where: { enrollmentId, status: 'sent' },
+    where: { enrollmentId, status: { in: ['sent', 'opened'] } },
     orderBy: { sentAt: 'desc' },
     select: { externalMessageId: true },
   });
@@ -394,7 +397,7 @@ async function createPersonalizedDraft(enrollment, step) {
       where: {
         enrollmentId: enrollment.id,
         sequenceStepId: step.id,
-        status: { in: ['draft_pending', 'approved', 'sent'] },
+        status: { in: ['draft_pending', 'approved', 'sent', 'opened'] },
       },
     });
     if (existing) return existing;
@@ -492,14 +495,16 @@ async function sendApprovedDraft(enrollment, step, draft) {
   const subject = interpolate(draft.subject || '',   prospect, sender);
   const body    = interpolate(draft.draftBody || '', prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
-  const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
   // linkify converts markdown [text](url) and bare URLs to anchor
   // tags. If the body is already HTML (from the rich-text editor or
   // pasted formatting), pass it through; otherwise map newlines to
-  // <br/> so plain-text bodies render correctly.
+  // <br/> so plain-text bodies render correctly. External links are
+  // then rewritten through the signed /track/click redirect, and the
+  // signed open pixel is appended last.
   const linkedBody = linkify(body);
   const bodyHtml = looksLikeHtml(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
-  const htmlBody = `${bodyHtml}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+  const trackedBody = wrapLinksForClickTracking(bodyHtml, prospect.id, step.id);
+  const htmlBody = `${trackedBody}<img src="${buildOpenPixelUrl(prospect.id, step.id)}" width="1" height="1" style="display:none" />`;
 
   // If this step is configured to reply in-thread, check whether ANY
   // prior sent email exists for this enrollment. The reply send itself
@@ -641,7 +646,7 @@ async function prepareUpcomingDrafts({ lookaheadDays, maxPerRun } = {}) {
       where: {
         enrollmentId: enrollment.id,
         sequenceStepId: nextStep.id,
-        status: { in: ['draft_pending', 'approved', 'sent', 'rejected'] },
+        status: { in: ['draft_pending', 'approved', 'sent', 'opened', 'rejected'] },
       },
     });
     if (existing) { result.skipped += 1; continue; }
@@ -719,26 +724,34 @@ async function sendStepEmail(enrollment, step) {
   const subject = interpolate(step.subject, prospect, sender);
   const body    = interpolate(step.body, prospect, sender);
   const appUrl  = process.env.APP_URL || 'http://localhost:3000';
-  const trackingUrl = `${appUrl}/track/open?prospectId=${prospect.id}&stepId=${step.id}`;
   // linkify converts markdown [text](url) and bare URLs to anchor
   // tags. If the body is already HTML (from the rich-text editor or
   // pasted formatting), pass it through; otherwise map newlines to
-  // <br/> so plain-text bodies render correctly.
+  // <br/> so plain-text bodies render correctly. External links are
+  // then rewritten through the signed /track/click redirect, and the
+  // signed open pixel is appended last.
   const linkedBody = linkify(body);
   const bodyHtml = looksLikeHtml(linkedBody) ? linkedBody : linkedBody.replace(/\n/g, '<br/>');
-  const htmlBody = `${bodyHtml}<img src="${trackingUrl}" width="1" height="1" style="display:none" />`;
+  const trackedBody = wrapLinksForClickTracking(bodyHtml, prospect.id, step.id);
+  const htmlBody = `${trackedBody}<img src="${buildOpenPixelUrl(prospect.id, step.id)}" width="1" height="1" style="display:none" />`;
 
-  const priorMessageId = step.replyToPrevious
-    ? await findPriorInternetMessageId(enrollment.id)
-    : null;
+  // Reply threading: mirror sendApprovedDraft — ANY prior sent email for
+  // this enrollment enables reply mode. sendReplyViaGraph falls back to a
+  // Sent Items recipient lookup when the stored internetMessageId is null.
+  // (Was `findPriorInternetMessageId`, a function that never existed —
+  // every non-AI replyToPrevious step threw a ReferenceError.)
+  const prior = step.replyToPrevious
+    ? await findPriorSentForEnrollment(enrollment.id)
+    : { exists: false, externalMessageId: null };
+  const replyMode = step.replyToPrevious && prior.exists;
 
   let externalMessageId = null;
 
   // Try Microsoft Graph first (preferred — sends from rep's own Outlook)
   try {
     const { accessToken, fromEmail } = await getMicrosoftAccessToken(ownerId);
-    if (step.replyToPrevious && priorMessageId) {
-      externalMessageId = await sendReplyViaGraph(accessToken, priorMessageId, prospect.email, htmlBody);
+    if (replyMode) {
+      externalMessageId = await sendReplyViaGraph(accessToken, prior.externalMessageId, prospect.email, htmlBody);
     } else {
       externalMessageId = await sendViaGraph(accessToken, fromEmail, prospect.email, subject, htmlBody);
     }
@@ -749,16 +762,16 @@ async function sendStepEmail(enrollment, step) {
       const smtpUser = transporter.options?.auth?.user || process.env.SMTP_USER || '';
       const fromName = process.env.EMAIL_FROM_NAME || smtpUser;
       const unsubscribeUrl = `${appUrl}/prospects/list-unsubscribe?email=${encodeURIComponent(prospect.email)}`;
-      const smtpSubject = step.replyToPrevious && priorMessageId
+      const smtpSubject = replyMode
         ? (subject.toLowerCase().startsWith('re:') ? subject : `Re: ${subject}`)
         : subject;
       const smtpHeaders = {
         'List-Unsubscribe':      `<${unsubscribeUrl}>`,
         'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
       };
-      if (step.replyToPrevious && priorMessageId) {
-        smtpHeaders['In-Reply-To'] = priorMessageId;
-        smtpHeaders['References']  = priorMessageId;
+      if (replyMode && prior.externalMessageId) {
+        smtpHeaders['In-Reply-To'] = prior.externalMessageId;
+        smtpHeaders['References']  = prior.externalMessageId;
       }
       const info = await transporter.sendMail({
         from: `"${fromName}" <${smtpUser}>`,
@@ -819,8 +832,9 @@ async function runDueSequenceEmails() {
   // Count emails already sent today
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
+  // 'opened' rows were sent too — count them or opens quietly raise the cap.
   const sentToday = await prisma.emailActivity.count({
-    where: { status: 'sent', sentAt: { gte: todayStart } },
+    where: { status: { in: ['sent', 'opened'] }, sentAt: { gte: todayStart } },
   });
 
   if (sentToday >= MAX_PER_DAY) {

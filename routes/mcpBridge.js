@@ -37,6 +37,7 @@ const {
 const { enforceHenrySignature, recipientBlockReasons } = require('../services/sendGate');
 const { createAsset, existingAssetIds, resolveAttachmentRefs, AssetError } = require('../services/emailAssets');
 const { computeBdrMetrics } = require('../services/bdrMetrics');
+const { getEmailStats, parseSinceParam, parseUntilParam } = require('../services/emailStats');
 const { KINDS: BLOCKLIST_KINDS, getGateLists, invalidateGateLists } = require('../services/gateLists');
 
 // Content-gate rollout switch: on (default) rejects content-rule violations;
@@ -900,6 +901,28 @@ router.get('/bdr-metrics', requireBridgeAuth, async (req, res) => {
     });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `bdr-metrics failed: ${err.message}` });
+  }
+});
+
+// GET /api/mcp/email-stats?sequenceId=&from=&to=&groupBy=sequence|step|day —
+// open/click-rate aggregation over sequence EmailActivity rows (the
+// get_email_stats MCP tool). Read-only; shares services/emailStats.js with
+// GET /email-activities/stats so every consumer reports the same numbers.
+router.get('/email-stats', requireBridgeAuth, async (req, res) => {
+  try {
+    const { sequenceId, from, to, groupBy } = req.query;
+    // Date-only bounds are interpreted in the send timezone; a date-only
+    // "to" is extended to end of day so the named day is fully included.
+    const since = parseSinceParam(from);
+    const until = parseUntilParam(to);
+    if ((since && Number.isNaN(since.getTime())) || (until && Number.isNaN(until.getTime()))) {
+      return res.status(400).json({ ok: false, error: '"from"/"to" must be ISO dates' });
+    }
+    const stats = await getEmailStats({ sequenceId, since, until, groupBy: groupBy || undefined });
+    return res.json({ ok: true, ...stats });
+  } catch (err) {
+    const status = /groupBy must be|sequenceId must be/.test(err.message) ? 400 : 500;
+    return res.status(status).json({ ok: false, error: `email-stats failed: ${err.message}` });
   }
 });
 

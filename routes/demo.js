@@ -218,8 +218,8 @@ router.post('/load', async (req, res) => {
     const getEnrollment = (email) => allEnrollments.find(e => e.prospect.email === email);
 
     const emailActivityData = [
-      // Sarah Chen — step 1 sent & opened, step 3 sent & opened → meeting booked
-      { email: 'schen@vertexai.io',       step: step1, status: 'opened',    sentAt: daysAgo(14), openedAt: daysAgo(13) },
+      // Sarah Chen — step 1 sent & opened (link clicked), step 3 sent & opened → meeting booked
+      { email: 'schen@vertexai.io',       step: step1, status: 'opened',    sentAt: daysAgo(14), openedAt: daysAgo(13), clickedAt: daysAgo(13), clickCount: 2 },
       { email: 'schen@vertexai.io',       step: step3, status: 'opened',    sentAt: daysAgo(9),  openedAt: daysAgo(8) },
       // Marcus Okafor — step 1 opened, replied after
       { email: 'mokafor@bridgepoint.com', step: step1, status: 'opened',    sentAt: daysAgo(10), openedAt: daysAgo(9) },
@@ -227,8 +227,8 @@ router.post('/load', async (req, res) => {
       { email: 'priya.sharma@nexushr.co', step: step1, status: 'sent',      sentAt: daysAgo(7),  openedAt: null },
       // James Whitfield — step 1 sent
       { email: 'jwhitfield@lumencorp.com', step: step1, status: 'sent',     sentAt: daysAgo(2),  openedAt: null },
-      // Ethan Reynolds — step 1 opened, step 3 sent
-      { email: 'ereynolds@fusionstack.com', step: step1, status: 'opened',  sentAt: daysAgo(12), openedAt: daysAgo(11) },
+      // Ethan Reynolds — step 1 opened (link clicked), step 3 sent
+      { email: 'ereynolds@fusionstack.com', step: step1, status: 'opened',  sentAt: daysAgo(12), openedAt: daysAgo(11), clickedAt: daysAgo(10), clickCount: 1 },
       { email: 'ereynolds@fusionstack.com', step: step3, status: 'sent',    sentAt: daysAgo(5),  openedAt: null },
       // Rachel Thornton — step 1 sent (then opted out)
       { email: 'rthornton@meridianhr.com', step: step1, status: 'sent',     sentAt: daysAgo(12), openedAt: null },
@@ -250,6 +250,8 @@ router.post('/load', async (req, res) => {
           subject: ea.step.subject,
           sentAt: ea.sentAt,
           openedAt: ea.openedAt,
+          clickedAt: ea.clickedAt || null,
+          clickCount: ea.clickCount || 0,
           failureReason: ea.failureReason || null,
           createdAt: ea.sentAt || daysAgo(8),
         },

@@ -26,6 +26,7 @@ const callsRouter = require('./routes/calls');
 const vmRecordingsRouter = require('./routes/vmRecordings');
 const researchRouter = require('./routes/research');
 const mcpBridgeRouter = require('./routes/mcpBridge');
+const trackingRouter = require('./routes/tracking');
 const cron = require('node-cron');
 const { runDueSequenceEmails, prepareUpcomingDrafts } = require('./services/sequenceMailer');
 const { runReplyDetection } = require('./services/replyDetector');
@@ -65,6 +66,10 @@ app.use('/calls', callsRouter);
 app.use('/vm-recordings', vmRecordingsRouter);
 app.use('/research', researchRouter);
 app.use('/api/mcp', mcpBridgeRouter);
+// Public (no auth): open-pixel + click-redirect endpoints fetched by
+// recipients' mail clients. Must stay ahead of the production static
+// catch-all below or GETs would be swallowed by the SPA fallback.
+app.use('/track', trackingRouter);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', message: 'Apex BDR API' });

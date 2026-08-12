@@ -443,6 +443,35 @@ export async function runGetSendPolicy() {
 }
 
 /**
+ * Read open/click engagement stats for sequence emails: sent/opened/clicked
+ * counts plus openRate/clickRate, optionally grouped by sequence/step/day.
+ */
+export async function runGetEmailStats({ sequenceId, from, to, groupBy } = {}) {
+  const r = await callBridge('/api/mcp/email-stats', { sequenceId, from, to, groupBy }, 'GET');
+  if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
+  const pct = (v) => `${v}%`;
+  const lines = [
+    `Email engagement ${r.since.slice(0, 10)} → ${r.until.slice(0, 10)}${r.sequenceId ? ` (sequence ${r.sequenceId})` : ' (all sequences)'}:`,
+    `   sent:    ${r.sent}`,
+    `   opened:  ${r.opened} (${pct(r.openRate)})`,
+    `   clicked: ${r.clicked} (${pct(r.clickRate)})${r.totalClicks > r.clicked ? ` — ${r.totalClicks} total clicks` : ''}`,
+    `   failed:  ${r.failed}`,
+    ...(r.draftPending ? [`   awaiting review: ${r.draftPending}`] : []),
+    ...(r.approved ? [`   approved (will send): ${r.approved}`] : []),
+  ];
+  if (Array.isArray(r.groups) && r.groups.length) {
+    lines.push('', `By ${r.groupBy}:`);
+    for (const g of r.groups) {
+      lines.push(
+        `   ${g.label} — sent ${g.sent}, opened ${g.opened} (${pct(g.openRate)}), clicked ${g.clicked} (${pct(g.clickRate)})${g.failed ? `, failed ${g.failed}` : ''}`
+      );
+    }
+  }
+  lines.push('', 'Note: opens are inflated by mail-client image prefetch (Apple Mail, Gmail proxy) — treat clicks as the reliable signal.');
+  return { isError: false, text: lines.join('\n') };
+}
+
+/**
  * Cancel / pause / resume queued items by trackingId, batchId, recipient, or
  * domain. cancel is terminal; pause is a reversible hold (resume to release).
  */
@@ -817,6 +846,33 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['trackingId'],
       },
     },
+    {
+      name: 'get_email_stats',
+      description: [
+        'Read open/click engagement stats for sequence emails (tracking-pixel +',
+        'click-redirect data): sent, opened, clicked counts plus openRate and',
+        'clickRate percentages over an optional send-date window.',
+        '',
+        'Optionally add a breakdown with groupBy=sequence (compare sequences),',
+        'groupBy=step (find which step earns the clicks), or groupBy=day (trend',
+        'over time). Filter to one sequence with sequenceId. Dates are ISO',
+        '(YYYY-MM-DD or full timestamps); omit both to cover all time.',
+        '',
+        'Read-only. Rates are cohort-based: of the emails SENT in the window,',
+        'the share opened/clicked. Opens are inflated by mail-client image',
+        'proxies; treat clicks as the trustworthy engagement signal.',
+      ].join('\n'),
+      inputSchema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          sequenceId: { type: 'string', description: 'Restrict to one sequence id.' },
+          from: { type: 'string', description: 'ISO date lower bound on send time.' },
+          to: { type: 'string', description: 'ISO date upper bound on send time.' },
+          groupBy: { type: 'string', enum: ['sequence', 'step', 'day'], description: 'Add a per-sequence / per-step / per-day breakdown.' },
+        },
+      },
+    },
   ],
 }));
 
@@ -839,6 +895,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     outcome = await runManageQueuedEmail(args || {});
   } else if (name === 'update_queued_email') {
     outcome = await runUpdateQueuedEmail(args || {});
+  } else if (name === 'get_email_stats') {
+    outcome = await runGetEmailStats(args || {});
   } else {
     return {
       isError: true,

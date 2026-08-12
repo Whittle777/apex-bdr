@@ -3,6 +3,7 @@ const router = express.Router();
 const { authenticateToken } = require('../middleware/auth');
 
 const prisma = require('../services/database');
+const { getEmailStats, parseSinceParam, parseUntilParam } = require('../services/emailStats');
 router.use(authenticateToken);
 
 /**
@@ -44,7 +45,7 @@ router.get('/sequence/:sequenceId', async (req, res) => {
     // send shortly, or a sent record). The activity row is the
     // source-of-truth for that step; the placeholder would be a
     // confusing duplicate.
-    const COVERED_STATUSES = new Set(['draft_pending', 'approved', 'sent']);
+    const COVERED_STATUSES = new Set(['draft_pending', 'approved', 'sent', 'opened']);
     const activityCovers = (enrollmentId, stepId) =>
       activities.some(a =>
         a.enrollmentId === enrollmentId &&
@@ -116,46 +117,33 @@ router.patch('/enrollment/:enrollmentId/cancel', async (req, res) => {
  * Reschedule a scheduled email — updates nextStepDue.
  * Body: { scheduledFor: ISO date string }
  */
-// GET /email-activities/stats?since=ISO&until=ISO
-// Returns per-status counts for EmailActivity rows whose sentAt (for sent
-// records) or createdAt (for non-sent — e.g. failed, opened, drafts)
-// falls in the range. Used by Analytics for the "Emails Sent" KPI.
+// GET /email-activities/stats?since=ISO&until=ISO&sequenceId=&groupBy=sequence|step|day
+// Open/click-rate aggregation over EmailActivity, delegated to
+// services/emailStats.js (shared with the MCP bridge and the NLQ
+// snapshot). NOTE: `sent` means DELIVERED — status 'sent' OR 'opened' —
+// since an opened row is a sent email whose pixel fired. `opened` and
+// `clicked` count within that same send cohort, so openRate/clickRate
+// are self-consistent. Used by Analytics for the "Emails Sent" KPI.
 router.get('/stats', async (req, res) => {
   try {
-    const since = req.query.since ? new Date(req.query.since) : new Date(0);
-    const until = req.query.until ? new Date(req.query.until) : new Date();
+    // Date-only bounds are interpreted in the send timezone and until is
+    // extended to end of day ("until=2026-08-10" includes the whole 10th).
+    const since = parseSinceParam(req.query.since) || new Date(0);
+    const until = parseUntilParam(req.query.until) || new Date();
     if (Number.isNaN(since.getTime()) || Number.isNaN(until.getTime())) {
       return res.status(400).json({ message: 'Invalid since/until' });
     }
-
-    // For 'sent' / 'opened' we anchor on sentAt; for the rest, createdAt.
-    // Counted via separate queries so the date column matches semantics.
-    const [sent, opened, failed, draftPending, approved] = await Promise.all([
-      prisma.emailActivity.count({
-        where: { status: 'sent', sentAt: { gte: since, lte: until } },
-      }),
-      prisma.emailActivity.count({
-        where: { status: 'opened', sentAt: { gte: since, lte: until } },
-      }),
-      prisma.emailActivity.count({
-        where: { status: 'failed', createdAt: { gte: since, lte: until } },
-      }),
-      prisma.emailActivity.count({
-        where: { status: 'draft_pending', createdAt: { gte: since, lte: until } },
-      }),
-      prisma.emailActivity.count({
-        where: { status: 'approved', createdAt: { gte: since, lte: until } },
-      }),
-    ]);
-
-    res.json({
-      since: since.toISOString(),
-      until: until.toISOString(),
-      sent, opened, failed, draftPending, approved,
-      // Total "delivered or attempted" — useful as the headline number
-      totalAttempts: sent + failed,
+    const stats = await getEmailStats({
+      since,
+      until,
+      sequenceId: req.query.sequenceId,
+      groupBy: req.query.groupBy || undefined,
     });
+    res.json(stats);
   } catch (err) {
+    if (/groupBy must be|sequenceId must be/.test(err.message)) {
+      return res.status(400).json({ message: err.message });
+    }
     console.error('[email-stats]', err);
     res.status(500).json({ message: err.message });
   }

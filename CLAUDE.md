@@ -30,27 +30,25 @@ npm run dev              # vite dev server → localhost:5175
 
 ## Authentication — CRITICAL
 
-**Auth is bypassed for local development.** `middleware/auth.js` → `authenticateToken` does this:
+**The old "auth is bypassed" note is stale.** `middleware/auth.js` → `authenticateToken` is now a real JWT check: it reads the `Authorization: Bearer` header, verifies it with `JWT_SECRET`, sets `req.userId` from the token, and returns 401/403 otherwise. Routes opt in via `router.use(authenticateToken)`.
 
-```js
-req.userId = 1;   // hardcoded — every request is treated as user 1
-next();
-```
-
-All protected routes call `router.use(authenticateToken)` but it never actually validates anything. Do **not** add real auth checks without understanding this. The real token validators (`authenticateGoogleWorkspaceToken`, `authenticateMicrosoftToken`) exist but are not used on any route.
+Public (no-auth) routes that must NEVER get auth middleware:
+- `/track/open` and `/track/click` (`routes/tracking.js`) — fetched by recipients' mail clients, which send no Authorization header. Abuse is prevented by HMAC-signed URLs instead (see `services/trackingLinks.js`).
+- `/api/mcp/*` uses its own bearer scheme (`requireBridgeAuth` in `routes/mcpBridge.js`: per-user `apexbdr_` tokens hashed against `User.mcpTokenHash`, or the legacy `MCP_BRIDGE_TOKEN` shared secret).
 
 ---
 
 ## Database — Prisma + SQLite
 
-**Schema file:** `schema.prisma` (repo root)  
-**Database file:** `dev.db` (repo root, gitignored)  
+**Schema file:** `prisma/schema.prisma` — this is the AUTHORITATIVE schema (`package.json` has `"prisma": { "schema": "prisma/schema.prisma" }`). The root-level `schema.prisma` is a stale SQLite leftover from May; do not edit it.  
+**Database:** Postgres via `DATABASE_URL` (injected by Railway in production; local `.env` has no `DATABASE_URL`, so `npx prisma db push` fails locally by design).  
 **Prisma client:** generated into `node_modules/@prisma/client`
 
 **To apply schema changes:**
 ```
-npx prisma db push        # fast, no migration file — use for dev
-npx prisma migrate dev    # requires interactive terminal — won't work in CI
+npx prisma generate       # regenerate the client locally (no DB needed)
+# push happens automatically at production boot via scripts/dbPushWithRetry.js
+# (npm start). To push manually: DATABASE_URL="postgresql://..." npx prisma db push
 ```
 
 **Prisma client import pattern used everywhere:**
@@ -136,12 +134,15 @@ UNIQUE: [prospectId, sequenceId]
 ### EmailActivity
 ```
 id, prospectId (FK), sequenceStepId (FK), enrollmentId (FK),
-status, subject, scheduledFor?, sentAt?, openedAt?, failureReason?, createdAt
+status, subject, scheduledFor?, sentAt?, openedAt?, clickedAt?, clickCount,
+failureReason?, externalMessageId?, draft* fields, createdAt
 ```
 
-**`status` values:** `sent` | `opened` | `failed` | `cancelled`
+**`status` values:** `sent` | `opened` | `failed` | `cancelled` | `draft_pending` | `approved` | `rejected`
 
-Created by `enrollmentService.recordStepSent()`. Updated to `opened` by `enrollmentService.recordOpen()` (called from the tracking pixel endpoint). Failed sends also write a record (in `sequenceMailer.runDueSequenceEmails()`).
+Created by `enrollmentService.recordStepSent()`. Updated to `opened` by `enrollmentService.recordOpen()` (tracking pixel) and `recordClick()` (click redirect; a click backfills `openedAt` too and increments `clickCount`). Failed sends also write a record (in `sequenceMailer.runDueSequenceEmails()`).
+
+**CRITICAL: status moves `sent` → `opened` when the pixel fires.** Any query that means "this email was sent" must filter `status IN ('sent','opened')`, never `status = 'sent'` alone. Already fixed in: daily-cap count and prior-message threading lookup in `sequenceMailer.js`, draft-dedup checks, `COVERED_STATUSES` in `routes/emailActivities.js`. Do not reintroduce bare `'sent'` filters.
 
 ### CallActivity
 ```
@@ -499,8 +500,14 @@ cron.schedule('*/15 * * * *', async () => {
 4. If step is `CALL`, `LINKEDIN`, `TASK` → the cron does not auto-send these. The scheduler still advances past them via `recordStepSent()` which is called regardless. **Note:** currently the mailer sends email for ANY step type — if you want CALL steps to just advance without emailing, add a type check.
 5. On error → create `EmailActivity { status: 'failed', failureReason: err.message }`
 
-**Tracking pixels:**  
-`GET /track/open?prospectId=X&stepId=Y` → calls `recordOpen(prospectId, stepId)` → updates EmailActivity to `opened`. The pixel is embedded as a 1×1 `<img>` in the HTML email.
+**Open & click tracking** (`routes/tracking.js`, public, no auth; URL builders in `services/trackingLinks.js`):
+- `GET /track/open?prospectId=X&stepId=Y&sig=…` → `recordOpen()` → EmailActivity status `opened` + `openedAt`. Returns a 1×1 GIF always. Unsigned hits are accepted (legacy emails sent before signing existed) but a present-and-wrong sig is ignored.
+- `GET /track/click?prospectId=X&stepId=Y&url=…&sig=…` → `recordClick()` (sets `clickedAt`, increments `clickCount`, backfills `openedAt`) then 302-redirects to `url`. The sig is REQUIRED and covers the target URL, so this is not an open redirect.
+- The mailer (`sequenceMailer.js`, both `sendStepEmail` and `sendApprovedDraft`) appends the signed pixel and rewrites every external `<a href>` through `/track/click` via `wrapLinksForClickTracking()`. Links pointing at `APP_URL` (e.g. unsubscribe) are left unwrapped; HTML-entity hrefs (`&amp;`) are decoded before signing. Click-wrapping is a NO-OP when `APP_URL` is unset or localhost, so local-dev sends keep working links (clicks just go untracked).
+- Signing secret: `TRACKING_SECRET` env var, falling back to `JWT_SECRET`. Rotating it invalidates tracking links inside already-sent emails.
+- Caveat: open rates are inflated by Apple Mail / Gmail image proxies; clicks are the trustworthy signal.
+
+**Stats aggregation** — `services/emailStats.js` `getEmailStats({ sequenceId?, since?, until?, groupBy? })` is the single source of truth (groupBy: `sequence` | `step` | `day`). Consumers: `GET /email-activities/stats` (AnalyticsDashboard; NOTE its `sent` now means status IN sent/opened), `GET /api/mcp/email-stats` (the `get_email_stats` MCP tool), and the `emailEngagement` block injected into the `/orchestration/nlq` CRM snapshot (makes open/click rates natural-language queryable from the Dashboard chat).
 
 ---
 

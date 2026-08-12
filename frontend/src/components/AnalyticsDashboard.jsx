@@ -161,9 +161,9 @@ const AnalyticsDashboard = () => {
       </div>
 
       {/* KPI Cards */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: 12 }}>
         {loading ? (
-          [1,2,3,4,5].map(i => (
+          [1,2,3,4,5,6].map(i => (
             <div key={i} className="metric-card" style={{ flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 72 }}>
               <div className="skeleton" style={{ width: 36, height: 36, borderRadius: 'var(--radius-sm)', flexShrink: 0 }} />
               <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -185,6 +185,16 @@ const AnalyticsDashboard = () => {
               trend={undefined}
               icon="📤"
               color="var(--accent-soft)"
+            />
+            <StatCard
+              label="Open Rate"
+              value={emailStats ? `${emailStats.openRate ?? 0}%` : '—'}
+              sub={emailStats
+                ? `${emailStats.clicked || 0} clicked · ${emailStats.clickRate ?? 0}% CTR`
+                : 'loading…'}
+              trend={undefined}
+              icon="👁️"
+              color="var(--status-success-soft)"
             />
             <StatCard label="Active Enrollments" value={totalEnrollments} sub={`across ${sequences.length} sequences`} trend={undefined} icon="✉️" color="var(--accent-soft)" />
             <StatCard label="Reply Rate" value={`${replyRate}%`} sub={`${replied} of ${totalProspects} replied`} trend={undefined} icon="💬" color="var(--status-success-soft)" />
