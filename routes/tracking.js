@@ -17,7 +17,13 @@
 const express = require('express');
 const router = express.Router();
 const { recordOpen, recordClick } = require('../services/enrollmentService');
-const { verifyOpenSig, verifyClickSig } = require('../services/trackingLinks');
+const { recordQueueOpen, recordQueueClick } = require('../services/queueTracking');
+const {
+  verifyOpenSig,
+  verifyClickSig,
+  verifyQueueOpenSig,
+  verifyQueueClickSig,
+} = require('../services/trackingLinks');
 
 // 1x1 transparent GIF
 const PIXEL = Buffer.from(
@@ -30,13 +36,24 @@ const toId = (v) => {
   return Number.isInteger(n) && n > 0 ? n : null;
 };
 
+// Real trackingIds are q_<uuid>. Rejecting anything outside this shape
+// (defense in depth on top of the length-prefixed HMAC) kills any
+// delimiter-games input before it reaches signature verification.
+const isTrackingId = (v) => typeof v === 'string' && /^[A-Za-z0-9_-]+$/.test(v);
+
 router.get('/open', async (req, res) => {
   const prospectId = toId(req.query.prospectId);
   const stepId = toId(req.query.stepId);
+  const tid = req.query.tid; // OutboundQueue trackingId (bridge/queue sends)
   const sig = req.query.sig;
 
   try {
-    if (prospectId && stepId) {
+    if (tid) {
+      // Queue form postdates signing, so a valid sig is always required.
+      if (isTrackingId(tid) && verifyQueueOpenSig(sig, tid)) {
+        await recordQueueOpen(tid);
+      }
+    } else if (prospectId && stepId) {
       if (!sig) {
         // Legacy pixel from an email sent before signing existed.
         await recordOpen(prospectId, stepId);
@@ -63,16 +80,23 @@ router.get('/open', async (req, res) => {
 router.get('/click', async (req, res) => {
   const prospectId = toId(req.query.prospectId);
   const stepId = toId(req.query.stepId);
+  const tid = req.query.tid; // OutboundQueue trackingId (bridge/queue sends)
   const url = req.query.url;
   const sig = req.query.sig;
 
   const isHttpUrl = typeof url === 'string' && /^https?:\/\//i.test(url);
-  if (!prospectId || !stepId || !isHttpUrl || !verifyClickSig(sig, prospectId, stepId, url)) {
+  const validQueue = isTrackingId(tid) && isHttpUrl && verifyQueueClickSig(sig, tid, url);
+  const validSequence = !tid && prospectId && stepId && isHttpUrl && verifyClickSig(sig, prospectId, stepId, url);
+  if (!validQueue && !validSequence) {
     return res.status(400).send('Invalid tracking link');
   }
 
   try {
-    await recordClick(prospectId, stepId);
+    if (validQueue) {
+      await recordQueueClick(tid);
+    } else {
+      await recordClick(prospectId, stepId);
+    }
   } catch (err) {
     // Recording failure must not strand the recipient — still redirect.
     console.error('[track/click] failed to record click:', err.message);

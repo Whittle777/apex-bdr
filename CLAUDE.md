@@ -509,6 +509,12 @@ cron.schedule('*/15 * * * *', async () => {
 
 **Stats aggregation** — `services/emailStats.js` `getEmailStats({ sequenceId?, since?, until?, groupBy? })` is the single source of truth (groupBy: `sequence` | `step` | `day`). Consumers: `GET /email-activities/stats` (AnalyticsDashboard; NOTE its `sent` now means status IN sent/opened), `GET /api/mcp/email-stats` (the `get_email_stats` MCP tool), and the `emailEngagement` block injected into the `/orchestration/nlq` CRM snapshot (makes open/click rates natural-language queryable from the Dashboard chat).
 
+**Queue (bridge) send tracking** — MCP bridge/queue sends (`OutboundQueue`, via `enqueue_email`/`enqueue_batch` → `sendQueueWorker`) are a SEPARATE cohort from sequence emails: they create no EmailActivity rows. They get their own tracking, keyed by the row's unique `trackingId`:
+- `OutboundQueue.openedAt / clickedAt / clickCount`, written ONLY by the `/track` endpoints (`services/queueTracking.js` `recordQueueOpen/recordQueueClick`); the worker's sent-update never touches them, so a duplicate-delivery race can't clobber engagement.
+- URL forms: `/track/open?tid=<trackingId>&sig=` and `/track/click?tid=…&url=…&sig=` (sign prefixes `qopen`/`qclick`; a valid sig is ALWAYS required — no legacy exemption). Sequence URLs (`prospectId`+`stepId`) are unchanged.
+- Injection happens in `bridgeMailer.buildHtmlBody(body, tracking)` — the single choke point for both `sendEmailViaGraph` and `sendReplyViaGraph`. On replies it runs BEFORE the quoted original is appended, so quoted content is never wrapped. The worker passes `tracking: { trackingId }`; the immediate `send_email`/`reply_to_email` routes pass nothing and stay untracked (no queue row to record against). CID inline images are unaffected (only `<a href>` anchors are rewritten).
+- Surfacing: `GET /api/mcp/queue` selects the three fields and returns an `engagement` rollup; `check_email_queue` text marks rows `opened` / `clicked xN`; `get_email_stats` returns a `queue` block scoped to the caller's account; the NLQ snapshot carries `emailEngagement.queueSends` (app-wide) via `getQueueEngagementStats()`.
+
 ---
 
 ## Reply Detection & OOO Handling

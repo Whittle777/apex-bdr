@@ -215,6 +215,7 @@ async function drainQueue({ now = new Date() } = {}) {
             replyAll: item.replyAll,
             includeOriginalBody: item.includeOriginalBody,
             selfEmail: token.fromEmail, // loop-guard: never deliver a reply back to ourselves
+            tracking: { trackingId: item.trackingId }, // signed open pixel + click-wrapped links
           })
         : await sendEmailViaGraph({
             accessToken: token.accessToken,
@@ -224,6 +225,7 @@ async function drainQueue({ now = new Date() } = {}) {
             cc: item.cc,
             bcc: item.bcc,
             attachments: resolvedAttachments,
+            tracking: { trackingId: item.trackingId }, // signed open pixel + click-wrapped links
           });
 
       // A reply that landed back at the sending mailbox is a TERMINAL failure —

@@ -37,7 +37,7 @@ const {
 const { enforceHenrySignature, recipientBlockReasons } = require('../services/sendGate');
 const { createAsset, existingAssetIds, resolveAttachmentRefs, AssetError } = require('../services/emailAssets');
 const { computeBdrMetrics } = require('../services/bdrMetrics');
-const { getEmailStats, parseSinceParam, parseUntilParam } = require('../services/emailStats');
+const { getEmailStats, getQueueEngagementStats, parseSinceParam, parseUntilParam } = require('../services/emailStats');
 const { KINDS: BLOCKLIST_KINDS, getGateLists, invalidateGateLists } = require('../services/gateLists');
 
 // Content-gate rollout switch: on (default) rejects content-rule violations;
@@ -773,12 +773,18 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
         trackingId: true, to: true, subject: true, status: true, batchId: true,
         clientRef: true, meta: true,
         inReplyToMessageId: true, scheduledFor: true, sentAt: true,
+        openedAt: true, clickedAt: true, clickCount: true,
         messageId: true, internetMessageId: true, conversationId: true,
         attempts: true, failureReason: true, createdAt: true,
       },
     });
     const shaped = items.map(shapeQueueItem);
     const counts = shaped.reduce((acc, it) => ((acc[it.status] = (acc[it.status] || 0) + 1), acc), {});
+    // Engagement rollup over the listed rows (opens/clicks recorded by /track).
+    const engagement = {
+      opened: shaped.filter((it) => it.openedAt).length,
+      clicked: shaped.filter((it) => it.clickedAt).length,
+    };
 
     // Surface the day's send policy so "stopped because cap" is never invisible
     // again. Resolve the policy user: per-user token → that user; shared token →
@@ -791,7 +797,7 @@ router.get('/queue', requireBridgeAuth, async (req, res) => {
       console.warn('[mcpBridge] send-policy lookup for queue failed:', err.message);
     }
 
-    return res.json({ ok: true, total: shaped.length, counts, policy, items: shaped });
+    return res.json({ ok: true, total: shaped.length, counts, engagement, policy, items: shaped });
   } catch (err) {
     return res.status(500).json({ ok: false, error: `Queue lookup failed: ${err.message}` });
   }
@@ -919,7 +925,17 @@ router.get('/email-stats', requireBridgeAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: '"from"/"to" must be ISO dates' });
     }
     const stats = await getEmailStats({ sequenceId, since, until, groupBy: groupBy || undefined });
-    return res.json({ ok: true, ...stats });
+    // Bridge/queue sends are a separate cohort (no EmailActivity rows) —
+    // report them alongside, scoped to the caller's account when the
+    // token resolves to one. Never fail the sequence stats over it.
+    let queue = null;
+    try {
+      const cred = await resolveCred(req);
+      if (cred) queue = await getQueueEngagementStats({ userId: cred.userId, since, until });
+    } catch (err) {
+      console.warn('[mcpBridge] queue engagement lookup failed:', err.message);
+    }
+    return res.json({ ok: true, ...stats, queue });
   } catch (err) {
     const status = /groupBy must be|sequenceId must be/.test(err.message) ? 400 : 500;
     return res.status(status).json({ ok: false, error: `email-stats failed: ${err.message}` });

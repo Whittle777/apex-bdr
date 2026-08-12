@@ -361,6 +361,8 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
         `Queue item ${trackingId}:`,
         `   status:       ${it.status}`,
         ...(it.to ? [`   to:           ${it.to}`] : []),
+        ...(it.openedAt ? [`   opened:       ${it.openedAt}`] : []),
+        ...(it.clickedAt ? [`   clicked:      ${it.clickedAt} (x${it.clickCount || 1})`] : []),
         ...(it.clientRef ? [`   clientRef:    ${it.clientRef}`] : []),
         ...(inet != null ? [`   internetMsgId:${inet}   ← RFC 5322 dedupe key`] : []),
         ...(it.graphItemId ? [`   graphItemId:  ${it.graphItemId}   ← EWS item-id (internal)`] : []),
@@ -389,8 +391,11 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
             ? ' ⚠️ daily cap reached — remaining items carry to the next window/day.'
             : '')
     : null;
+  const eng = r.engagement && (r.engagement.opened || r.engagement.clicked)
+    ? ` — opened=${r.engagement.opened} clicked=${r.engagement.clicked}`
+    : '';
   const lines = [
-    `Queue${scope}: ${r.total} item(s) — ${counts}`,
+    `Queue${scope}: ${r.total} item(s) — ${counts}${eng}`,
     ...(policyLine ? [policyLine] : []),
     ...r.items.slice(0, 50).map((it) => {
       const ref = it.clientRef ? ` ref=${it.clientRef}` : '';
@@ -399,9 +404,10 @@ export async function runCheckEmailQueue({ batchId, trackingId, status, recipien
       const inet = it.internetMessageId
         ? ` inet=${it.internetMessageId}`
         : (it.status === 'sent' ? ' inet=null' : '');
+      const engaged = it.clickedAt ? ` clicked x${it.clickCount || 1}` : (it.openedAt ? ' opened' : '');
       const graph = it.graphItemId ? ` graph=${it.graphItemId.slice(0, 18)}…` : '';
       const metaStr = it.meta != null ? ` meta=${JSON.stringify(it.meta)}` : '';
-      return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${ref}${inet}${graph}${metaStr}`;
+      return `   ${it.status.padEnd(9)} ${it.to || it.inReplyToMessageId || ''}${ref}${inet}${engaged}${graph}${metaStr}`;
     }),
     ...(r.items.length > 50 ? [`   …and ${r.items.length - 50} more`] : []),
   ];
@@ -451,13 +457,17 @@ export async function runGetEmailStats({ sequenceId, from, to, groupBy } = {}) {
   if (!r.ok) return { isError: true, text: `❌ ${r.error}${r.httpStatus ? ` (HTTP ${r.httpStatus})` : ''}` };
   const pct = (v) => `${v}%`;
   const lines = [
-    `Email engagement ${r.since.slice(0, 10)} → ${r.until.slice(0, 10)}${r.sequenceId ? ` (sequence ${r.sequenceId})` : ' (all sequences)'}:`,
+    `Sequence email engagement ${r.since.slice(0, 10)} → ${r.until.slice(0, 10)}${r.sequenceId ? ` (sequence ${r.sequenceId})` : ' (all sequences)'}:`,
     `   sent:    ${r.sent}`,
     `   opened:  ${r.opened} (${pct(r.openRate)})`,
     `   clicked: ${r.clicked} (${pct(r.clickRate)})${r.totalClicks > r.clicked ? ` — ${r.totalClicks} total clicks` : ''}`,
     `   failed:  ${r.failed}`,
     ...(r.draftPending ? [`   awaiting review: ${r.draftPending}`] : []),
     ...(r.approved ? [`   approved (will send): ${r.approved}`] : []),
+    ...(r.queue ? [
+      '',
+      `Bridge/queue mail (separate cohort, this inbox): sent ${r.queue.sent}, opened ${r.queue.opened} (${pct(r.queue.openRate)}), clicked ${r.queue.clicked} (${pct(r.queue.clickRate)})${r.queue.totalClicks > r.queue.clicked ? ` — ${r.queue.totalClicks} total clicks` : ''}`,
+    ] : []),
   ];
   if (Array.isArray(r.groups) && r.groups.length) {
     lines.push('', `By ${r.groupBy}:`);
@@ -752,6 +762,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         '  on (clientRef, internetMessageId) with no fuzzy matching.',
         '- meta — the opaque blob you sent (e.g. {"step":2,"lane":1}), verbatim.',
         '- conversationId — for threading follow-ups.',
+        '- openedAt/clickedAt/clickCount — open/click tracking on sent items',
+        '  (signed pixel + click-redirect links injected at send time). Text',
+        '  output marks engaged rows with "opened" / "clicked xN"; the list',
+        '  header carries an opened=/clicked= rollup. For rates, use',
+        '  get_email_stats.',
         '',
         "When listing (not a single trackingId), the response also reports the day's",
         'send policy — cap, sentToday, remainingToday, gate, window open/closed — so',
@@ -849,9 +864,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'get_email_stats',
       description: [
-        'Read open/click engagement stats for sequence emails (tracking-pixel +',
+        'Read open/click engagement stats for outbound email (tracking-pixel +',
         'click-redirect data): sent, opened, clicked counts plus openRate and',
-        'clickRate percentages over an optional send-date window.',
+        'clickRate percentages over an optional send-date window. Two cohorts',
+        'are reported: sequence emails (the main numbers, sequenceId/groupBy',
+        'apply to these) and bridge/queue sends from this inbox (the `queue`',
+        'block — enqueue_email/enqueue_batch mail, date window applies, the',
+        'other filters do not).',
         '',
         'Optionally add a breakdown with groupBy=sequence (compare sequences),',
         'groupBy=step (find which step earns the clicks), or groupBy=day (trend',

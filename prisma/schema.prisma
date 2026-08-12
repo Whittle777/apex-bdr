@@ -326,6 +326,9 @@ model OutboundQueue {
   attempts            Int       @default(0)
   scheduledFor        DateTime? // earliest-eligible time (default: now); future-dating allowed
   sentAt              DateTime?
+  openedAt            DateTime? // first tracking-pixel hit (set only by /track, never by the worker)
+  clickedAt           DateTime? // first tracked link click (click implies open)
+  clickCount          Int       @default(0) // total tracked link clicks
   messageId           String? // EWS / Graph item-id (internal handle) — NOT the RFC Message-ID
   internetMessageId   String? // RFC 5322 <…@…> Message-ID — the stable, dedupe-safe key
   conversationId      String?

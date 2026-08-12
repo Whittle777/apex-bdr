@@ -4,7 +4,7 @@ const { GoogleGenAI } = require('@google/genai');
 const Anthropic = require('@anthropic-ai/sdk');
 
 const prisma = require('../services/database');
-const { getEmailStats } = require('../services/emailStats');
+const { getEmailStats, getQueueEngagementStats } = require('../services/emailStats');
 // ─── Resolve active AI provider ───────────────────────────────────────────────
 // Priority: Claude (DB cred) > Claude (env) > Gemini (DB cred) > Gemini (env)
 const resolveAIProvider = async () => {
@@ -84,7 +84,7 @@ const topN = (obj, n) =>
 // Pre-compute aggregates so the AI doesn't have to count raw records itself,
 // which leads to hallucinated numbers. Raw records are still included for
 // list-building queries that need individual prospect IDs.
-const buildCRMSnapshot = (prospects, sequences, emailStats = null) => {
+const buildCRMSnapshot = (prospects, sequences, emailStats = null, queueStats = null) => {
   const byStatus = countBy(prospects, p => p.status);
   const byCompany = topN(countBy(prospects, p => p.companyName), 20);
 
@@ -112,26 +112,44 @@ const buildCRMSnapshot = (prospects, sequences, emailStats = null) => {
     enrollmentStatusCounts,
     // Open/click tracking aggregates (all-time), pre-computed by
     // services/emailStats.js so the model never has to count raw rows.
-    emailEngagement: emailStats
+    // Either cohort alone keeps the block alive: totals/bySequence go
+    // null if sequence stats failed, queueSends is null until any
+    // bridge/queue mail has been sent.
+    emailEngagement: (emailStats || (queueStats && queueStats.sent > 0))
       ? {
-          totals: {
-            sent: emailStats.sent,
-            opened: emailStats.opened,
-            clicked: emailStats.clicked,
-            failed: emailStats.failed,
-            openRatePct: emailStats.openRate,
-            clickRatePct: emailStats.clickRate,
-          },
-          bySequence: (emailStats.groups || []).map(g => ({
-            sequenceId: g.sequenceId,
-            name: g.label,
-            sent: g.sent,
-            opened: g.opened,
-            clicked: g.clicked,
-            failed: g.failed,
-            openRatePct: g.openRate,
-            clickRatePct: g.clickRate,
-          })),
+          totals: emailStats
+            ? {
+                sent: emailStats.sent,
+                opened: emailStats.opened,
+                clicked: emailStats.clicked,
+                failed: emailStats.failed,
+                openRatePct: emailStats.openRate,
+                clickRatePct: emailStats.clickRate,
+              }
+            : null,
+          bySequence: emailStats
+            ? (emailStats.groups || []).map(g => ({
+                sequenceId: g.sequenceId,
+                name: g.label,
+                sent: g.sent,
+                opened: g.opened,
+                clicked: g.clicked,
+                failed: g.failed,
+                openRatePct: g.openRate,
+                clickRatePct: g.clickRate,
+              }))
+            : null,
+          // Bridge/queue one-off sends (MCP enqueue) — a separate cohort
+          // from sequence emails; null until any have been sent.
+          queueSends: queueStats && queueStats.sent > 0
+            ? {
+                sent: queueStats.sent,
+                opened: queueStats.opened,
+                clicked: queueStats.clicked,
+                openRatePct: queueStats.openRate,
+                clickRatePct: queueStats.clickRate,
+              }
+            : null,
         }
       : null,
   };
@@ -161,7 +179,7 @@ router.post('/nlq', async (req, res) => {
     if (!prompt) return res.status(400).json({ error: 'Prompt is required' });
 
     // ── Fetch CRM data ──────────────────────────────────────────────────────
-    const [prospects, sequences, emailStats] = await Promise.all([
+    const [prospects, sequences, emailStats, queueStats] = await Promise.all([
       prisma.prospect.findMany({
         include: { sequenceEnrollments: { include: { sequence: true } } },
       }),
@@ -173,9 +191,13 @@ router.post('/nlq', async (req, res) => {
         console.warn('[nlq] email stats unavailable:', err.message);
         return null;
       }),
+      getQueueEngagementStats().catch(err => {
+        console.warn('[nlq] queue engagement unavailable:', err.message);
+        return null;
+      }),
     ]);
 
-    const snapshot = buildCRMSnapshot(prospects, sequences, emailStats);
+    const snapshot = buildCRMSnapshot(prospects, sequences, emailStats, queueStats);
     const slimProspects = prospects.map(slimProspect);
 
     // ── Recent conversation context (last 6 turns) ──────────────────────────
@@ -208,7 +230,7 @@ ${JSON.stringify(snapshot, null, 2)}
 - status: Prospect contact status. Values seen in data: ${Object.keys(snapshot.byStatus).join(', ')}
 - sequences[].status: Enrollment status. Common values: active, paused, completed, bounced
 - company: Account / company name
-- emailEngagement: open/click tracking aggregates (all-time). totals = across all sequences; bySequence = per-sequence breakdown. openRatePct/clickRatePct are percentages of emails SENT. Use these (never compute your own) for any question about open rates, click rates, or email engagement. If emailEngagement is null, say engagement data is unavailable.
+- emailEngagement: open/click tracking aggregates (all-time). totals = across all sequences; bySequence = per-sequence breakdown; queueSends = the separate one-off/queued outreach cohort (not part of any sequence, null if none sent). openRatePct/clickRatePct are percentages of emails SENT. Use these (never compute your own) for any question about open rates, click rates, or email engagement. If emailEngagement is null, say engagement data is unavailable; if only emailEngagement.totals is null, say sequence engagement is unavailable but still report queueSends.
 
 ─── ALL PROSPECTS (slim — use IDs for list building) ───
 ${JSON.stringify(slimProspects, null, 2)}

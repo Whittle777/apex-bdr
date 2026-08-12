@@ -217,4 +217,30 @@ async function getEmailStats({ sequenceId, since, until, groupBy } = {}) {
   return result;
 }
 
-module.exports = { getEmailStats, parseSinceParam, parseUntilParam };
+/**
+ * Open/click engagement for bridge/queue sends (OutboundQueue) — the
+ * cohort get_email_stats' sequence numbers deliberately exclude, since
+ * queue sends create no EmailActivity rows. Same cohort semantics:
+ * counts anchor on sentAt within [since, until]. Pass userId to scope
+ * to one sending account (the bridge does); omit it for app-wide
+ * aggregates (the NLQ snapshot does).
+ */
+async function getQueueEngagementStats({ userId, since, until } = {}) {
+  since = since || new Date(0);
+  until = until || new Date();
+  const rows = await prisma.outboundQueue.findMany({
+    where: {
+      ...(userId ? { userId } : {}),
+      status: 'sent',
+      sentAt: { gte: since, lte: until },
+    },
+    select: { status: true, sentAt: true, openedAt: true, clickedAt: true, clickCount: true },
+  });
+  return {
+    since: since.toISOString(),
+    until: until.toISOString(),
+    ...tally(rows),
+  };
+}
+
+module.exports = { getEmailStats, getQueueEngagementStats, parseSinceParam, parseUntilParam };

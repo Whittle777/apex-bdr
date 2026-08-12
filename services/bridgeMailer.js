@@ -19,6 +19,12 @@
 const axios = require('axios');
 const { linkify } = require('./sequenceMailer');
 const { pollSentMessage } = require('./graphSentLookup');
+const {
+  buildQueueOpenPixelUrl,
+  wrapLinksForQueueClickTracking,
+  stripTrackingFromHtml,
+  isPublicAppUrl,
+} = require('./trackingLinks');
 
 const GRAPH = 'https://graph.microsoft.com/v1.0';
 const HTML_TAG = /<(p|div|br|ul|ol|li|strong|b|em|i|u|a|span|h[1-6])\b/i;
@@ -44,10 +50,24 @@ class GraphError extends Error {
  * Linkify markdown / bare URLs, then ensure HTML. Plain-text bodies get
  * \n → <br/>; bodies that already contain block/inline HTML pass through.
  * Same heuristic the sequence mailer and the original route used.
+ *
+ * When `tracking` carries an OutboundQueue trackingId (queue sends only —
+ * immediate send_email/reply_to_email calls pass nothing), external links
+ * are rewritten through the signed /track/click redirect and the signed
+ * open pixel is appended. This is the single choke point shared by the
+ * send and reply paths; on replies it runs on the NEW body only, before
+ * the quoted original is concatenated, so the quote (which may contain
+ * the prospect's own links or previously wrapped ones) is never touched.
+ * Skipped entirely unless APP_URL is a publicly reachable host.
  */
-function buildHtmlBody(body) {
+function buildHtmlBody(body, tracking = null) {
   const linked = linkify(body);
-  return HTML_TAG.test(linked) ? linked : linked.replace(/\n/g, '<br/>');
+  let html = HTML_TAG.test(linked) ? linked : linked.replace(/\n/g, '<br/>');
+  if (tracking?.trackingId && isPublicAppUrl()) {
+    html = wrapLinksForQueueClickTracking(html, tracking.trackingId);
+    html += `<img src="${buildQueueOpenPixelUrl(tracking.trackingId)}" width="1" height="1" style="display:none" />`;
+  }
+  return html;
 }
 
 // Graph's POST /me/sendMail accepts a message up to ~4MB total in a single
@@ -100,9 +120,9 @@ function buildGraphAttachments(attachments) {
  * `attachments` (optional): resolved descriptors [{name,contentType,contentBytes,
  * isInline?,contentId?}]. Inline images are referenced from the body via cid:.
  */
-async function sendEmailViaGraph({ accessToken, to, subject, body, cc, bcc, attachments, debug = GRAPH_DEBUG }) {
+async function sendEmailViaGraph({ accessToken, to, subject, body, cc, bcc, attachments, tracking, debug = GRAPH_DEBUG }) {
   const startedAt = Date.now();
-  const htmlBody = buildHtmlBody(body);
+  const htmlBody = buildHtmlBody(body, tracking);
   const graphAttachments = buildGraphAttachments(attachments);
   const message = {
     subject,
@@ -205,7 +225,7 @@ const addressesOf = (recipients) =>
  */
 async function sendReplyViaGraph({
   accessToken, to, inReplyToMessageId, body, cc, bcc,
-  replyAll = false, includeOriginalBody = true, selfEmail, debug = GRAPH_DEBUG,
+  replyAll = false, includeOriginalBody = true, selfEmail, tracking, debug = GRAPH_DEBUG,
 }) {
   const startedAt = Date.now();
 
@@ -277,8 +297,11 @@ async function sendReplyViaGraph({
       const senderName = m.from?.emailAddress?.name || m.from?.emailAddress?.address || 'sender';
       const senderEmail = m.from?.emailAddress?.address || '';
       const sentAt = m.sentDateTime ? new Date(m.sentDateTime).toLocaleString() : '';
+      // Strip OUR tracking artifacts from the quoted parent (its pixel is
+      // still live — left in place it would fire on every open of THIS
+      // email and credit the parent row instead).
       const origBodyHtml = m.body?.contentType?.toLowerCase() === 'html'
-        ? (m.body?.content || '')
+        ? stripTrackingFromHtml(m.body?.content || '')
         : `<pre style="font-family: inherit; white-space: pre-wrap;">${(m.body?.content || '').replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]))}</pre>`;
       originalQuoteHtml =
         `<br><br><div style="border-left: 2px solid #ccc; padding-left: 12px; color: #666;">` +
@@ -289,7 +312,7 @@ async function sendReplyViaGraph({
     }
   }
 
-  const finalBodyHtml = buildHtmlBody(body) + originalQuoteHtml;
+  const finalBodyHtml = buildHtmlBody(body, tracking) + originalQuoteHtml;
   // The explicit toRecipients OVERRIDES Graph's sender-derived auto-fill. This
   // is the line that fixes the misdirected-reply bug.
   const message = {

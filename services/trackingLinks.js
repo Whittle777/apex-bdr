@@ -23,13 +23,14 @@ const SECRET =
 
 const appUrl = () => process.env.APP_URL || 'http://localhost:3000';
 
-/** HMAC-SHA256 over the joined parts, truncated to 16 hex chars. */
+/**
+ * HMAC-SHA256 over the parts, truncated to 16 hex chars. Each part is
+ * length-prefixed before joining so no part containing a delimiter can
+ * shift the boundaries and make two different tuples collide.
+ */
 function sign(...parts) {
-  return crypto
-    .createHmac('sha256', SECRET)
-    .update(parts.join(':'))
-    .digest('hex')
-    .slice(0, 16);
+  const encoded = parts.map((p) => `${Buffer.byteLength(String(p))}:${p}`).join('|');
+  return crypto.createHmac('sha256', SECRET).update(encoded).digest('hex').slice(0, 16);
 }
 
 function safeEqual(a, b) {
@@ -59,6 +60,32 @@ function verifyClickSig(sig, prospectId, stepId, targetUrl) {
   return safeEqual(sig, sign('click', prospectId, stepId, targetUrl));
 }
 
+// ── Queue-item variants ─────────────────────────────────────────────────
+// Bridge/queue sends (OutboundQueue) are keyed by trackingId instead of
+// prospect+step. Distinct sign prefixes ('qopen'/'qclick') keep the two
+// URL families from ever cross-verifying.
+
+function buildQueueOpenPixelUrl(trackingId) {
+  const sig = sign('qopen', trackingId);
+  return `${appUrl()}/track/open?tid=${encodeURIComponent(trackingId)}&sig=${sig}`;
+}
+
+function verifyQueueOpenSig(sig, trackingId) {
+  return safeEqual(sig, sign('qopen', trackingId));
+}
+
+function buildQueueClickUrl(trackingId, targetUrl) {
+  const sig = sign('qclick', trackingId, targetUrl);
+  return (
+    `${appUrl()}/track/click?tid=${encodeURIComponent(trackingId)}` +
+    `&url=${encodeURIComponent(targetUrl)}&sig=${sig}`
+  );
+}
+
+function verifyQueueClickSig(sig, trackingId, targetUrl) {
+  return safeEqual(sig, sign('qclick', trackingId, targetUrl));
+}
+
 /**
  * Minimal HTML entity decode for href attribute values. Rich-text /
  * pasted / LLM HTML serializes '&' inside attributes as '&amp;'; the
@@ -83,13 +110,13 @@ function isPublicAppUrl() {
 }
 
 /**
- * Rewrite every external http(s) anchor href in an HTML body to a signed
- * /track/click redirect. Links pointing back at APP_URL are left alone
- * (unsubscribe links, already-wrapped tracking links), so this is safe
- * to call on any body the mailer produces. No-op unless APP_URL is a
- * publicly reachable host.
+ * Shared link-rewriting core: wrap every external http(s) anchor href
+ * through the click redirect produced by buildUrl(target). Links
+ * pointing back at APP_URL are left alone (unsubscribe links,
+ * already-wrapped tracking links). No-op unless APP_URL is a publicly
+ * reachable host.
  */
-function wrapLinksForClickTracking(html, prospectId, stepId) {
+function wrapLinks(html, buildUrl) {
   if (!html || !isPublicAppUrl()) return html;
   const own = appUrl();
   return html.replace(
@@ -97,9 +124,48 @@ function wrapLinksForClickTracking(html, prospectId, stepId) {
     (match, prefix, quote, url) => {
       const target = decodeHtmlEntities(url);
       if (target.startsWith(own)) return match;
-      return `${prefix}${quote}${buildClickUrl(prospectId, stepId, target)}${quote}`;
+      return `${prefix}${quote}${buildUrl(target)}${quote}`;
     }
   );
+}
+
+/** Sequence-email variant: click URLs keyed by prospect+step. */
+function wrapLinksForClickTracking(html, prospectId, stepId) {
+  return wrapLinks(html, (target) => buildClickUrl(prospectId, stepId, target));
+}
+
+/** Queue-item variant: click URLs keyed by OutboundQueue trackingId. */
+function wrapLinksForQueueClickTracking(html, trackingId) {
+  return wrapLinks(html, (target) => buildQueueClickUrl(trackingId, target));
+}
+
+/**
+ * Neutralize OUR tracking artifacts inside an HTML fragment being quoted
+ * into a new email (reply threading): remove /track/open pixels and
+ * unwrap /track/click anchors back to their original targets. Without
+ * this, a quoted parent email's still-valid pixel would fire on every
+ * open of the follow-up and credit the WRONG row. Covers both URL
+ * families (sequence and queue) since they share the /track prefixes.
+ */
+function stripTrackingFromHtml(html) {
+  if (!html) return html;
+  const esc = appUrl().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let out = html.replace(
+    new RegExp(`<img\\b[^>]*src=(["'])${esc}\\/track\\/open[^"']*\\1[^>]*\\/?>`, 'gi'),
+    ''
+  );
+  out = out.replace(
+    new RegExp(`(href=)(["'])(${esc}\\/track\\/click[^"']+)\\2`, 'gi'),
+    (match, prefix, quote, trackUrl) => {
+      try {
+        const target = new URL(decodeHtmlEntities(trackUrl)).searchParams.get('url');
+        return target ? `${prefix}${quote}${target}${quote}` : match;
+      } catch {
+        return match;
+      }
+    }
+  );
+  return out;
 }
 
 module.exports = {
@@ -108,4 +174,11 @@ module.exports = {
   buildClickUrl,
   verifyClickSig,
   wrapLinksForClickTracking,
+  buildQueueOpenPixelUrl,
+  verifyQueueOpenSig,
+  buildQueueClickUrl,
+  verifyQueueClickSig,
+  wrapLinksForQueueClickTracking,
+  stripTrackingFromHtml,
+  isPublicAppUrl,
 };
