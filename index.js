@@ -25,6 +25,7 @@ const accountsRouter = require('./routes/accounts');
 const callsRouter = require('./routes/calls');
 const vmRecordingsRouter = require('./routes/vmRecordings');
 const researchRouter = require('./routes/research');
+const morningBriefRouter = require('./routes/morningBrief');
 const mcpBridgeRouter = require('./routes/mcpBridge');
 const trackingRouter = require('./routes/tracking');
 const cron = require('node-cron');
@@ -65,6 +66,7 @@ app.use('/accounts', accountsRouter);
 app.use('/calls', callsRouter);
 app.use('/vm-recordings', vmRecordingsRouter);
 app.use('/research', researchRouter);
+app.use('/morning-brief', morningBriefRouter);
 app.use('/api/mcp', mcpBridgeRouter);
 // Public (no auth): open-pixel + click-redirect endpoints fetched by
 // recipients' mail clients. Must stay ahead of the production static

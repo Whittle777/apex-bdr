@@ -9,7 +9,8 @@
     "build": "cd frontend && npm install && npm run build",
     "railway:deploy": "npm run build",
     "postinstall": "prisma generate",
-    "test": "dotenv -e .env.test -- npx prisma db push --skip-generate && dotenv -e .env.test -- jest"
+    "test": "dotenv -e .env.test -- npx prisma db push --skip-generate && dotenv -e .env.test -- jest",
+    "morning-brief": "node scripts/run-morning-brief.js --demo"
   },
   "prisma": {
     "schema": "prisma/schema.prisma"

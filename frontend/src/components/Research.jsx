@@ -1,5 +1,5 @@
-import React, { useState, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import React, { useEffect, useState, useRef } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import { parseZoomInfoCsv, parseAccountResearchCsv } from '../utils/zoomInfoCsv';
 import { useIntegrations } from '../contexts/IntegrationContext';
@@ -425,6 +425,7 @@ function AccountResearchPanel() {
 
   return (
     <>
+      <SignalWatchPanel />
       <div style={{
         background: 'rgba(56,189,248,0.06)',
         border: '1px solid rgba(56,189,248,0.18)',
@@ -528,6 +529,87 @@ function AccountResearchPanel() {
         </>
       )}
     </>
+  );
+}
+
+function SignalWatchPanel() {
+  const navigate = useNavigate();
+  const [brief, setBrief] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api.get('/morning-brief/latest')
+      .then(res => setBrief(res.data?.brief || res.data || null))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const accounts = brief?.accounts || brief?.rankedAccounts || brief?.cards || brief?.targets || [];
+  const signals = accounts.flatMap((account, accountIndex) => {
+    const details = account.account || account;
+    const company = details.company || details.companyName || details.name || details.domain || `Account ${accountIndex + 1}`;
+    const rows = account.signals || account.evidence || account.triggers || [];
+    return rows.slice(0, 2).map((signal, signalIndex) => ({
+      id: `${company}-${signalIndex}`,
+      company,
+      score: account.score ?? account.totalScore ?? account.priorityScore,
+      text: typeof signal === 'string'
+        ? signal
+        : signal.text || signal.label || signal.trigger || signal.description || 'New account signal',
+      urls: typeof signal === 'object'
+        ? (Array.isArray(signal.sourceUrls) ? signal.sourceUrls
+          : Array.isArray(signal.sources) ? signal.sources
+            : signal.sourceUrl ? [signal.sourceUrl] : [])
+        : [],
+    }));
+  }).slice(0, 4);
+
+  return (
+    <div style={{
+      marginBottom: 18,
+      padding: '15px 16px',
+      background: 'linear-gradient(110deg, rgba(245,158,11,0.08), rgba(14,165,233,0.06))',
+      border: '1px solid rgba(245,158,11,0.22)',
+      borderRadius: 'var(--radius-md)',
+    }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <div style={{ color: '#fbbf24', fontSize: '0.68rem', fontWeight: 800, letterSpacing: '0.1em', textTransform: 'uppercase' }}>Signal Watch</div>
+          <div style={{ fontWeight: 750, marginTop: 4 }}>Turn account research into reasons to reach out</div>
+          <div style={{ color: 'var(--text-secondary)', fontSize: '0.78rem', marginTop: 3 }}>
+            The latest brief promotes dated triggers and source links instead of leaving research buried in a summary field.
+          </div>
+        </div>
+        <button className="ghost" onClick={() => navigate('/morning-brief')} style={{ whiteSpace: 'nowrap' }}>
+          Open Morning Brief →
+        </button>
+      </div>
+
+      {loading ? (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: 13 }}>Checking the latest signal run…</div>
+      ) : signals.length > 0 ? (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))', gap: 8, marginTop: 13 }}>
+          {signals.map(signal => (
+            <div key={signal.id} style={{ padding: '10px 11px', background: 'rgba(12,14,19,0.3)', border: '1px solid var(--border-subtle)', borderRadius: 'var(--radius-sm)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <strong style={{ fontSize: '0.76rem', color: 'var(--accent-secondary)' }}>{signal.company}</strong>
+                {signal.score !== undefined && <span style={{ color: '#fbbf24', fontSize: '0.7rem', fontWeight: 800 }}>{signal.score}</span>}
+              </div>
+              <div style={{ fontSize: '0.78rem', lineHeight: 1.45, marginTop: 5 }}>{signal.text}</div>
+              {signal.urls.length > 0 && (
+                <a href={signal.urls[0]} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 5, color: 'var(--accent-secondary)', fontSize: '0.7rem' }}>
+                  Verify source ↗
+                </a>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginTop: 13 }}>
+          No signal run yet. Upload account context below, then use Morning Brief to surface new triggers worth a conversation.
+        </div>
+      )}
+    </div>
   );
 }
 

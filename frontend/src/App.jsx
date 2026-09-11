@@ -10,6 +10,7 @@ import SequenceManager from './components/SequenceManager';
 import Integrations from './components/Integrations';
 import HITLReviewView from './components/HITLReviewView';
 import AnalyticsDashboard from './components/AnalyticsDashboard';
+import MorningBrief from './components/MorningBrief';
 import DeliverabilityGate from './components/DeliverabilityGate';
 import VoiceFleetCommand from './components/VoiceFleetCommand';
 import SuccessPlans from './components/SuccessPlans';
@@ -97,6 +98,7 @@ const NAV = [
     label: 'Intelligence',
     links: [
       { path: '/analytics',     label: 'Analytics',  icon: '📊', desc: 'Your pipeline health & activity metrics (G+A)' },
+      { path: '/morning-brief', label: 'Morning Brief', icon: '🌅', desc: 'Overnight account research, new signals & next actions (G+O)' },
       { path: '/research',      label: 'Research',   icon: '🔬', desc: 'Upload a prospect list and generate AI research briefs' },
       { path: '/hitl',          label: 'Review Queue', icon: '🛡️', desc: 'Approve, edit, or regenerate AI-personalized sequence emails (G+R)' },
     ],
@@ -129,6 +131,7 @@ const SHORTCUTS = [
   { keys: ['G','P'],      desc: 'Go → Prospects' },
   { keys: ['G','B'],      desc: 'Go → Accounts' },
   { keys: ['G','A'],      desc: 'Go → Analytics' },
+  { keys: ['G','O'],      desc: 'Go → Morning Brief' },
   { keys: ['G','R'],      desc: 'Go → Review Queue' },
   { keys: ['G','T'],      desc: 'Go → Task Inbox' },
   { keys: ['G','M'],      desc: 'Go → Success Plans' },
@@ -150,6 +153,7 @@ const NAV_ACTIONS = [
   { icon:'👥', label:'Prospects',       path:'/prospects',        sub:'Browse, filter & enrich contacts' },
   { icon:'🏢', label:'Accounts',        path:'/accounts',         sub:'Company accounts & linked prospects' },
   { icon:'📊', label:'Analytics',       path:'/analytics',        sub:'Your pipeline health & activity metrics' },
+  { icon:'🌅', label:'Morning Brief',   path:'/morning-brief',    sub:'Overnight account ranking, signals & next actions' },
   { icon:'🔬', label:'Research',        path:'/research',         sub:'Upload a CSV and generate AI research briefs' },
   { icon:'🔗', label:'Integrations',    path:'/integrations',     sub:'CRM, Teams, Gmail config' },
   { icon:'🛡️', label:'Email Safety',   path:'/email-safety',     sub:'Sending limits, bounce rules & compliance' },
@@ -401,7 +405,7 @@ function AppInner() {
 
       // Second key of the chord — navigate if recognised
       if (gHeld) {
-        const map = { d:'/', c:'/dialer', s:'/sequence-manager', p:'/prospects', b:'/accounts', a:'/analytics', r:'/hitl', t:'/tasks', m:'/success-plans', i:'/integrations', v:'/voice-fleet' };
+        const map = { d:'/', c:'/dialer', s:'/sequence-manager', p:'/prospects', b:'/accounts', a:'/analytics', o:'/morning-brief', r:'/hitl', t:'/tasks', m:'/success-plans', i:'/integrations', v:'/voice-fleet' };
         if (map[e.key.toLowerCase()]) { navigate(map[e.key.toLowerCase()]); gHeld = false; }
       }
     };
@@ -678,6 +682,7 @@ function AppInner() {
             <Route path="/integrations"     element={<ProtectedRoute><Integrations /></ProtectedRoute>} />
             <Route path="/hitl"             element={<ProtectedRoute><HITLReviewView /></ProtectedRoute>} />
             <Route path="/analytics"        element={<ProtectedRoute><AnalyticsDashboard /></ProtectedRoute>} />
+            <Route path="/morning-brief"    element={<ProtectedRoute><MorningBrief /></ProtectedRoute>} />
             <Route path="/research"         element={<ProtectedRoute><Research /></ProtectedRoute>} />
             <Route path="/deliverability"   element={<ProtectedRoute><DeliverabilityGate /></ProtectedRoute>} />
             <Route path="/voice-fleet"      element={<ProtectedRoute><VoiceFleetCommand /></ProtectedRoute>} />
